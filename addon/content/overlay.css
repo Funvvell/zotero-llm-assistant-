@@ -1,0 +1,33 @@
+/* LLM Assistant Panel Styles */
+
+#zotero-llm-assistant-panel {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #ffffff;
+  border: 1px solid #d0d0d0;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+#zotero-llm-assistant-panel label {
+  font-size: 13px;
+}
+
+#zotero-llm-assistant-panel button {
+  min-height: 28px;
+  border-radius: 4px;
+  padding: 2px 12px;
+}
+
+#zotero-llm-assistant-panel textbox {
+  min-height: 28px;
+  border-radius: 4px;
+}
+
+/* Menu item styles */
+#zotero-llm-assistant-menu {
+  font-weight: 500;
+}
+
+#zotero-llm-assistant-menu > label {
+  color: #2563eb;
+}
