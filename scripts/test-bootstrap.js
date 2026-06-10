@@ -194,7 +194,7 @@ try {
 // Run startup
 console.log("\n=== Running startup() ===");
 const data = {
-  id: "llm-assistant@zotero.org",
+  id: "llm-assistant@example.com",
   version: "1.0.0",
   resourceURI: { spec: "resource://llm-assistant/" },
   rootURI: "chrome://zotero-llm-assistant/content/",

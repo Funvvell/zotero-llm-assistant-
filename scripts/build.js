@@ -17,7 +17,7 @@ const MANIFEST = JSON.parse(
   fs.readFileSync(path.join(ADDON_DIR, "manifest.json"), "utf-8")
 );
 
-const ADDON_ID = MANIFEST.applications.zotero.id;        // llm-assistant@zotero.org
+const ADDON_ID = MANIFEST.applications.zotero.id;        // llm-assistant@example.com
 const ADDON_NAME = "zotero-llm-assistant";              // used as .xpi filename prefix
 const VERSION = MANIFEST.version;
 

@@ -16,7 +16,7 @@ let windowObserver;
 
 // Reader popup listeners are auto-removed on plugin unload, so we only
 // need to track them for diagnostics.
-const _readerListenerPluginID = "llm-assistant@zotero.org";
+const _readerListenerPluginID = "llm-assistant@example.com";
 
 function install(data, reason) {}
 
