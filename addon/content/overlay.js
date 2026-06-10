@@ -27,22 +27,50 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
   }
 
   /**
-   * Try to get full text from an item's attachments
+   * Try to get full text from an item's attachments.
+   * Zotero 9 changed the PDF worker API; the old
+   *   Zotero.PDFWorker.getFullText(attID, true)
+   * form is deprecated. Prefer the modern per-attachment
+   *   att.getFullText() / Zotero.Fulltext.getFulltextItem(item)
+   * and fall back to the legacy path if necessary.
    */
   async function getFullText(item) {
     const attachments = item.getAttachments();
     for (const attID of attachments) {
       const att = Zotero.Items.get(attID);
-      if (att && att.isPDFAttachment()) {
+      if (!att || !att.isPDFAttachment()) continue;
+
+      // --- Modern path (Zotero 7.0.4+, recommended for 8/9) ---
+      // Per-attachment getFullText() returns a promise resolving to a
+      // string. Works on stable Zotero 7 and remains the supported API
+      // in 8/9.
+      if (typeof att.getFullText === "function") {
         try {
-          const path = await att.getFilePathAsync();
-          if (path) {
-            // Use Zotero's built-in PDF text extraction
-            const text = await Zotero.PDFWorker.getFullText(attID, true);
-            if (text) return text;
-          }
+          const text = await att.getFullText();
+          if (text) return text;
         } catch (e) {
-          Zotero.debug(`[LLM Assistant] Could not extract text from attachment: ${e.message}`);
+          Zotero.debug(`[LLM Assistant] att.getFullText() failed: ${e.message}`);
+        }
+      }
+
+      // --- Zotero.Fulltext module path (used in 8/9) ---
+      if (Zotero.Fulltext && typeof Zotero.Fulltext.getFulltextItem === "function") {
+        try {
+          await Zotero.Fulltext.getFulltextItem(att);
+          const text = att.attachmentFullText || "";
+          if (text) return text;
+        } catch (e) {
+          Zotero.debug(`[LLM Assistant] Zotero.Fulltext.getFulltextItem failed: ${e.message}`);
+        }
+      }
+
+      // --- Legacy fallback (Zotero 7) ---
+      if (Zotero.PDFWorker && typeof Zotero.PDFWorker.getFullText === "function") {
+        try {
+          const text = await Zotero.PDFWorker.getFullText(attID, true);
+          if (text) return text;
+        } catch (e) {
+          Zotero.debug(`[LLM Assistant] Zotero.PDFWorker.getFullText failed: ${e.message}`);
         }
       }
     }
@@ -378,14 +406,47 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
   }
 
   /**
-   * Get selected text and its bounding rect from the PDF reader
-   * Returns { text, rect } where rect has { left, top, right, bottom, width, height }
+   * Get selected text and its bounding rect from the PDF reader.
+   *
+   * Zotero 9 wraps the reader in a redesigned tab; the old
+   *   Zotero.Reader.getByTabID(...) + #reader-ui iframe
+   * query path can fail. We therefore consult three sources in order:
+   *   1. The cached selection stashed by our reader-popup listener
+   *      (Zotero.Reader.registerEventListener 'renderTextSelectionPopup')
+   *   2. The legacy reader.getSelectedText() + iframe rect lookup
+   *   3. An empty result (caller is expected to fall back to the
+   *      currently-selected library item)
    */
   function _getReaderSelectionWithRect() {
+    // 1. Cached selection (works on 7/8/9)
+    try {
+      const cached = Zotero.LLMAssistant && Zotero.LLMAssistant._lastSelection;
+      if (cached && cached.text) {
+        // Cache is considered fresh if it was set within the last
+        // 60 seconds (PDF reading happens slowly; this just guards
+        // against a stale popup from a different document).
+        if (Date.now() - cached.ts < 60000) {
+          // We do not have a rect for the cached selection; rect=null
+          // is handled by showAnnotationOnPDF.
+          return { text: cached.text, rect: null, source: "cached" };
+        }
+      }
+    } catch (e) {
+      Zotero.debug(`[LLM Assistant] cached selection read failed: ${e.message}`);
+    }
+
+    // 2. Legacy path (Zotero 7 / some 8 configs)
     try {
       const win = Zotero.getMainWindow();
-      const reader = Zotero.Reader.getByTabID(win.Zotero_Tabs.selectedID);
-      if (!reader) return { text: "", rect: null };
+      if (!win) return { text: "", rect: null };
+
+      const tabsAPI = win.Zotero_Tabs;
+      const reader = tabsAPI && Zotero.Reader && Zotero.Reader.getByTabID
+        ? Zotero.Reader.getByTabID(tabsAPI.selectedID)
+        : null;
+      if (!reader || typeof reader.getSelectedText !== "function") {
+        return { text: "", rect: null };
+      }
 
       const text = reader.getSelectedText() || "";
       if (!text) return { text: "", rect: null };
@@ -399,7 +460,6 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
           if (selection && selection.rangeCount > 0) {
             const range = selection.getRangeAt(0);
             const rangeRect = range.getBoundingClientRect();
-            // Convert iframe-relative to window-relative
             const iframeRect = iframe.getBoundingClientRect();
             rect = {
               left: iframeRect.left + rangeRect.left,
@@ -415,7 +475,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
         Zotero.debug(`[LLM Assistant] Could not get selection rect: ${e.message}`);
       }
 
-      return { text, rect };
+      return { text, rect, source: "legacy" };
     } catch (e) {
       Zotero.debug(`[LLM Assistant] Could not get reader selection: ${e.message}`);
     }
