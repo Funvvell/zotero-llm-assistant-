@@ -326,8 +326,53 @@ var TraditionalClient = {
         return { source: "azure", text: text2, error: null };
     },
 
-    /** @private Google Translate (translation.googleapis.com) — ?key=. */
+    /** @private Google Translate (v2, API key auth) — ?key=.
+     *  Docs: https://cloud.google.com/translate/docs/basic/translating-text
+     *  Endpoint: GET https://translation.googleapis.com/language/translate/v2?key=&q=&target=
+     */
     async _google(text, options) {
-        return { source: "google", text: null, error: "not implemented" };
+        const apiKey = this._getPref("pref-google-key");
+        if (!apiKey) {
+            return { source: "google", text: null, error: "google not configured" };
+        }
+        const target = options.to   || this._getPref("pref-google-to")   || "zh-CN";
+        const source = options.from || this._getPref("pref-google-from") || ""; // empty => auto-detect
+        const q      = String(text);
+
+        const params = new URLSearchParams({ key: apiKey, q, target });
+        if (source) params.set("source", source);
+        const url = `https://translation.googleapis.com/language/translate/v2?${params.toString()}`;
+
+        let raw;
+        try {
+            raw = await this._fetch(url, { method: "GET" });
+        } catch (e) {
+            return { source: "google", text: null, error: `google network: ${e.message}` };
+        }
+
+        let body;
+        try { body = JSON.parse(raw); } catch (e) {
+            return { source: "google", text: null, error: "google: invalid JSON" };
+        }
+        if (body.error && body.error.message) {
+            return {
+                source: "google",
+                text: null,
+                error: `google ${body.error.code || ""}: ${body.error.message}`
+            };
+        }
+        const translations = body.data && body.data.translations;
+        if (!translations || !translations.length) {
+            return { source: "google", text: null, error: "google: empty result" };
+        }
+        // Google returns HTML-escaped strings; un-escape &quot; &amp; &#39; etc.
+        const decode = (s) => String(s)
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/&amp;/g, "&")
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">");
+        const text2 = translations.map(t => decode(t.translatedText)).join("\n");
+        return { source: "google", text: text2, error: null };
     }
 };

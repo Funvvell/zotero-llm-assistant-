@@ -230,12 +230,13 @@ function test(name, fn) {
     });
 
     // 10) Other vendors are still stubs.
-    await test("google: stub returns 'not implemented'", async () => {
+    await test("google is implemented (not stub)", async () => {
         const { client } = loadClient();
         const r = await client._google("x", {});
         assert.strictEqual(r.source, "google");
         assert.strictEqual(r.text, null);
-        assert.strictEqual(r.error, "not implemented");
+        // Now returns "google not configured" instead of "not implemented".
+        assert.strictEqual(r.error, "google not configured");
     });
 
     // 11) Unknown engine returns error.
@@ -502,6 +503,113 @@ function test(name, fn) {
         await client._azure("hi", { from: "en", to: "ja" });
         assert.match(captured.url, /from=en/);
         assert.match(captured.url, /to=ja/);
+    });
+
+    // ============= Google tests =============================================
+
+    await test("google: not configured returns error", async () => {
+        const { client } = loadClient();
+        const r = await client._google("hello", {});
+        assert.strictEqual(r.source, "google");
+        assert.strictEqual(r.error, "google not configured");
+    });
+
+    await test("google: network error is reported", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-google-key": "k" },
+            fetchError: true
+        });
+        const r = await client._google("hello", {});
+        assert.match(r.error, /google network/);
+    });
+
+    await test("google: API error is reported", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-google-key": "k" },
+            fetchResponse: { status: 200, body: JSON.stringify({
+                error: { code: 403, message: "API key not valid" }
+            }) }
+        });
+        const r = await client._google("hello", {});
+        assert.match(r.error, /403/);
+        assert.match(r.error, /API key not valid/);
+    });
+
+    await test("google: invalid JSON returns error", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-google-key": "k" },
+            fetchResponse: { status: 200, body: "not json" }
+        });
+        const r = await client._google("hello", {});
+        assert.match(r.error, /invalid JSON/);
+    });
+
+    await test("google: empty data returns error", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-google-key": "k" },
+            fetchResponse: { status: 200, body: JSON.stringify({ data: {} }) }
+        });
+        const r = await client._google("hello", {});
+        assert.match(r.error, /empty result/);
+    });
+
+    await test("google: success GETs with key, target, and decodes HTML entities", async () => {
+        let captured = null;
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-google-key": "k1" },
+            fetchResponse: (url) => {
+                captured = { url };
+                return { status: 200, body: JSON.stringify({
+                    data: { translations: [
+                        { translatedText: "hello &amp; &quot;world&quot; &lt;ok&gt;", detectedSourceLanguage: "en" }
+                    ] }
+                }) };
+            }
+        });
+        const r = await client._google("你好", {});
+        assert.strictEqual(r.text, 'hello & "world" <ok>');
+        assert.strictEqual(r.error, null);
+        assert.match(captured.url, /translation\.googleapis\.com\/language\/translate\/v2/);
+        assert.match(captured.url, /[?&]key=k1/);
+        assert.match(captured.url, /[?&]q=/);
+        assert.match(captured.url, /[?&]target=zh-CN/);
+        // No source => no `source` param.
+        assert.doesNotMatch(captured.url, /source=/);
+    });
+
+    await test("google: source pref is sent when set", async () => {
+        let captured = null;
+        const { client } = loadClient({
+            prefValues: {
+                "extensions.zotero-llm-assistant.pref-google-key": "k1",
+                "extensions.zotero-llm-assistant.pref-google-from": "en",
+                "extensions.zotero-llm-assistant.pref-google-to":   "ja"
+            },
+            fetchResponse: (url) => { captured = { url }; return { status: 200, body: JSON.stringify({ data: { translations: [{ translatedText: "x" }] } }) }; }
+        });
+        await client._google("hi", {});
+        assert.match(captured.url, /source=en/);
+        assert.match(captured.url, /target=ja/);
+    });
+
+    await test("google: options.from/to override prefs", async () => {
+        let captured = null;
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-google-key": "k1" },
+            fetchResponse: (url) => { captured = { url }; return { status: 200, body: JSON.stringify({ data: { translations: [{ translatedText: "x" }] } }) }; }
+        });
+        await client._google("hi", { from: "de", to: "fr" });
+        assert.match(captured.url, /source=de/);
+        assert.match(captured.url, /target=fr/);
+    });
+
+    await test("google: 401 HTTP error is reported", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-google-key": "k" },
+            fetchResponse: { status: 401, body: "unauthorized" }
+        });
+        const r = await client._google("hello", {});
+        assert.match(r.error, /HTTP 401/);
     });
 
     console.log(`\n${passed} passed, ${failed} failed.`);
