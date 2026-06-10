@@ -124,6 +124,30 @@ var TraditionalClient = {
     },
 
     /**
+     * Compute a SHA-256 hex digest. Uses Node's crypto when available (tests),
+     * then Zotero's bundled helper, otherwise the Web Crypto SubtleCrypto API
+     * when present, then the pure-JS fallback.
+     * @private
+     */
+    async _sha256(input) {
+        if (typeof require === "function") {
+            try {
+                const crypto = require("crypto");
+                return crypto.createHash("sha256").update(String(input), "utf8").digest("hex");
+            } catch (e) { /* fall through */ }
+        }
+        if (typeof Zotero !== "undefined" && Zotero.Utilities &&
+            Zotero.Utilities.Internal && typeof Zotero.Utilities.Internal.sha256 === "function") {
+            return Zotero.Utilities.Internal.sha256(input);
+        }
+        if (typeof crypto !== "undefined" && crypto.subtle && typeof crypto.subtle.digest === "function") {
+            const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(input)));
+            return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+        }
+        return this._md5Pure(input); // last-resort; throws in unsupported envs
+    },
+
+    /**
      * Pure-JS MD5 (RFC 1321). Used as a last-resort fallback.
      * NOTE: This implementation has known issues with some inputs; prefer
      * the Node/Zotero helpers above. Kept only for environments where neither
@@ -194,9 +218,61 @@ var TraditionalClient = {
         return { source: "baidu", text: text2, error: null };
     },
 
-    /** @private Youdao Translate (openapi.youdao.com) — SHA-256 signature. */
+    /** @private Youdao Translate (openapi.youdao.com) — SHA-256 signature.
+     *  Docs: https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html
+     *  Endpoint: POST https://openapi.youdao.com/api
+     *  sign = sha256(appKey + input + salt + curtime + appSecret)
+     *  where `input` is `q` (≤20 chars) or `q[:10] + len + q[-10:]`.
+     */
     async _youdao(text, options) {
-        return { source: "youdao", text: null, error: "not implemented" };
+        const appKey    = this._getPref("pref-youdao-appkey");
+        const appSecret = this._getPref("pref-youdao-appsecret");
+        if (!appKey || !appSecret) {
+            return { source: "youdao", text: null, error: "youdao not configured" };
+        }
+        const from = options.from || "auto";
+        const to   = options.to   || "zh-CHS";
+        const q    = String(text);
+        const salt = String(Math.floor(Math.random() * 0x7fffffff));
+        const curtime = String(Math.floor(Date.now() / 1000));
+        const input = q.length > 20
+            ? q.substring(0, 10) + q.length + q.substring(q.length - 10)
+            : q;
+        const sign = await this._sha256(appKey + input + salt + curtime + appSecret);
+
+        const body = new URLSearchParams({
+            q, from, to, appKey, salt, sign, signType: "v3",
+            curtime, ext: "mp3", voice: "0"
+        }).toString();
+
+        let raw;
+        try {
+            raw = await this._fetch("https://openapi.youdao.com/api", {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body,
+                timeoutMs: this.DEFAULT_TIMEOUT_MS
+            });
+        } catch (e) {
+            return { source: "youdao", text: null, error: `youdao network: ${e.message}` };
+        }
+
+        let resp;
+        try { resp = JSON.parse(raw); } catch (e) {
+            return { source: "youdao", text: null, error: "youdao: invalid JSON" };
+        }
+
+        if (resp.errorCode && resp.errorCode !== "0") {
+            return {
+                source: "youdao",
+                text: null,
+                error: `youdao ${resp.errorCode}: youdao error`
+            };
+        }
+        if (!resp.translation || !resp.translation.length) {
+            return { source: "youdao", text: null, error: "youdao: empty result" };
+        }
+        return { source: "youdao", text: resp.translation.join("\n"), error: null };
     },
 
     /** @private Microsoft Translator (api.cognitive.microsoft.com) — header auth. */

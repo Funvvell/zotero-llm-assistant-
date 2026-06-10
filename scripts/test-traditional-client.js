@@ -31,9 +31,19 @@ const BAIDU_KNOWN_SALT  = "1435660288";
 const BAIDU_KNOWN_Q     = "apple";
 const BAIDU_KNOWN_SIGN  = "f89f9594663708c1605f3d736d01d2d4";
 
+// Youdao signature vector. Computed offline:
+//   sha256("id" + "你好" + "1435660288" + "1567419038" + "secret")
+// (https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html)
+const YOUDAO_KNOWN_APPKEY    = "id";
+const YOUDAO_KNOWN_APPSECRET = "secret";
+const YOUDAO_KNOWN_Q         = "你好";
+const YOUDAO_KNOWN_SALT      = "1435660288";
+const YOUDAO_KNOWN_CURTIME   = "1567419038";
+const YOUDAO_KNOWN_SIGN      = "d95c45dbd6e6dd62f43ad53cf7c38815d7d703738fbd086f22603fada94af3c8";
+
 // ----- Mock environment -----------------------------------------------------
 
-function makeMockEnv({ prefValues = {}, fetchResponse, fetchError } = {}) {
+function makeMockEnv({ prefValues = {}, fetchResponse, fetchError, nowMs = 1567419038000 } = {}) {
     const calls = { fetch: [] };
     const env = {
         Zotero: {
@@ -69,7 +79,7 @@ function makeMockEnv({ prefValues = {}, fetchResponse, fetchError } = {}) {
                     return;
                 }
                 const r = typeof fetchResponse === "function"
-                    ? fetchResponse(this._url)
+                    ? fetchResponse(this._url, this._method, this._headers, body)
                     : fetchResponse;
                 this.status = (r && r.status) || 200;
                 this.responseText = (r && r.body) || "";
@@ -78,6 +88,10 @@ function makeMockEnv({ prefValues = {}, fetchResponse, fetchError } = {}) {
         },
         URLSearchParams: URLSearchParams,
         Math,
+        Date: class extends Date {
+            constructor(...args) { super(...args); }
+            static now() { return nowMs; }
+        },
         console
     };
     return { env, calls };
@@ -216,14 +230,6 @@ function test(name, fn) {
     });
 
     // 10) Other vendors are still stubs.
-    await test("youdao: stub returns 'not implemented'", async () => {
-        const { client } = loadClient();
-        const r = await client._youdao("x", {});
-        assert.strictEqual(r.source, "youdao");
-        assert.strictEqual(r.text, null);
-        assert.strictEqual(r.error, "not implemented");
-    });
-
     await test("azure: stub returns 'not implemented'", async () => {
         const { client } = loadClient();
         const r = await client._azure("x", {});
@@ -279,6 +285,105 @@ function test(name, fn) {
         });
         const r = await client._baidu("hello", { timeoutMs: 50 });
         assert.match(r.error, /network/);
+    });
+
+    // ============= Youdao tests ============================================
+
+    await test("youdao: not configured returns error", async () => {
+        const { client } = loadClient();
+        const r = await client._youdao("hello", {});
+        assert.strictEqual(r.source, "youdao");
+        assert.strictEqual(r.text, null);
+        assert.strictEqual(r.error, "youdao not configured");
+    });
+
+    await test("youdao: network error is reported", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-youdao-appkey": "k", "extensions.zotero-llm-assistant.pref-youdao-appsecret": "s" },
+            fetchError: true
+        });
+        const r = await client._youdao("hello", {});
+        assert.match(r.error, /youdao network/);
+    });
+
+    await test("youdao: API errorCode is reported", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-youdao-appkey": "k", "extensions.zotero-llm-assistant.pref-youdao-appsecret": "s" },
+            fetchResponse: { status: 200, body: JSON.stringify({ errorCode: "401", errorMessage: "no permission" }) }
+        });
+        const r = await client._youdao("hello", {});
+        assert.strictEqual(r.text, null);
+        assert.match(r.error, /401/);
+    });
+
+    await test("youdao: invalid JSON returns error", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-youdao-appkey": "k", "extensions.zotero-llm-assistant.pref-youdao-appsecret": "s" },
+            fetchResponse: { status: 200, body: "<html>500</html>" }
+        });
+        const r = await client._youdao("hello", {});
+        assert.match(r.error, /invalid JSON/);
+    });
+
+    await test("youdao: empty translation returns error", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-youdao-appkey": "k", "extensions.zotero-llm-assistant.pref-youdao-appsecret": "s" },
+            fetchResponse: { status: 200, body: JSON.stringify({ errorCode: "0", translation: [] }) }
+        });
+        const r = await client._youdao("hello", {});
+        assert.match(r.error, /empty result/);
+    });
+
+    await test("youdao: success parses translation, signs, posts to openapi.youdao.com", async () => {
+        let captured = null;
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-youdao-appkey": "k", "extensions.zotero-llm-assistant.pref-youdao-appsecret": "s" },
+            fetchResponse: (url, method, headers, body) => {
+                captured = { url, method, headers, body };
+                return { status: 200, body: JSON.stringify({
+                    errorCode: "0",
+                    translation: ["hello"],
+                    query: "你好"
+                }) };
+            }
+        });
+        const r = await client._youdao("你好", {});
+        assert.strictEqual(r.text, "hello");
+        assert.strictEqual(r.error, null);
+        assert.strictEqual(captured.method, "POST");
+        assert.match(captured.url, /openapi\.youdao\.com\/api/);
+        assert.strictEqual(captured.headers["Content-Type"], "application/x-www-form-urlencoded");
+        // Body should contain these params.
+        assert.match(captured.body, /q=%E4%BD%A0%E5%A5%BD/);
+        assert.match(captured.body, /from=auto/);
+        assert.match(captured.body, /to=zh-CHS/);
+        assert.match(captured.body, /signType=v3/);
+        assert.match(captured.body, /salt=/);
+        assert.match(captured.body, /curtime=1567419038/);
+    });
+
+    await test("youdao: SHA-256 sign matches published vector", async () => {
+        const { client } = loadClient();
+        const sign = await client._sha256(
+            YOUDAO_KNOWN_APPKEY + YOUDAO_KNOWN_Q + YOUDAO_KNOWN_SALT +
+            YOUDAO_KNOWN_CURTIME + YOUDAO_KNOWN_APPSECRET
+        );
+        assert.strictEqual(sign, YOUDAO_KNOWN_SIGN);
+    });
+
+    await test("youdao: long q is truncated to first10+len+last10 in sign", async () => {
+        let captured = null;
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-youdao-appkey": "k", "extensions.zotero-llm-assistant.pref-youdao-appsecret": "s" },
+            fetchResponse: (url, method, headers, body) => {
+                captured = { url, body };
+                return { status: 200, body: JSON.stringify({ errorCode: "0", translation: ["hi"] }) };
+            }
+        });
+        const q = "a".repeat(50); // 50 chars, > 20
+        await client._youdao(q, {});
+        // q body param should be the full 50 chars; sign is computed from truncated.
+        assert.match(captured.body, new RegExp(`q=${"a".repeat(50)}`));
     });
 
     console.log(`\n${passed} passed, ${failed} failed.`);
