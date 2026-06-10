@@ -1,0 +1,45 @@
+{
+  "manifest_version": 2,
+  "name": "LLM Assistant",
+  "version": "1.1.0",
+  "description": "Integrate Large Language Models into Zotero for paper summarization, translation, and Q&A. v1.1 adds parallel traditional-translation engines (Baidu / Youdao / Azure / Google) alongside the LLM.",
+  "author": "LLM Assistant Contributors",
+  "icons": {
+    "48": "content/icons/icon@48.png",
+    "96": "content/icons/icon@96.png"
+  },
+  "applications": {
+    "zotero": {
+      "id": "llm-assistant@zotero.org",
+      "update_url": "",
+      "strict_min_version": "6.999",
+      "strict_max_version": "7.0.*"
+    }
+  },
+  "preferences": [
+    { "name": "extensions.zotero-llm-assistant.pref-traditional-engine",
+      "type": "string", "value": "baidu",
+      "label": "Active traditional-translation engine" },
+    { "name": "extensions.zotero-llm-assistant.pref-baidu-appid",
+      "type": "string", "value": "",
+      "label": "Baidu Translate app ID" },
+    { "name": "extensions.zotero-llm-assistant.pref-baidu-key",
+      "type": "string", "value": "",
+      "label": "Baidu Translate secret key" },
+    { "name": "extensions.zotero-llm-assistant.pref-youdao-appkey",
+      "type": "string", "value": "",
+      "label": "Youdao Translate app key" },
+    { "name": "extensions.zotero-llm-assistant.pref-youdao-appsecret",
+      "type": "string", "value": "",
+      "label": "Youdao Translate app secret" },
+    { "name": "extensions.zotero-llm-assistant.pref-azure-key",
+      "type": "string", "value": "",
+      "label": "Microsoft Azure Translator subscription key" },
+    { "name": "extensions.zotero-llm-assistant.pref-azure-region",
+      "type": "string", "value": "",
+      "label": "Microsoft Azure Translator region" },
+    { "name": "extensions.zotero-llm-assistant.pref-google-key",
+      "type": "string", "value": "",
+      "label": "Google Cloud Translation API key" }
+  ]
+}

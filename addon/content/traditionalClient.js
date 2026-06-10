@@ -21,6 +21,33 @@ var TraditionalClient = {
     DEFAULT_TIMEOUT_MS: 10000,
 
     /**
+     * Register sane defaults for the traditional-translation preferences
+     * so that `Zotero.Prefs.get(..., true)` and the XHTML `preference=`
+     * bindings both see a defined value.
+     */
+    _registerDefaults() {
+        if (typeof Zotero === "undefined" || !Zotero.Prefs) return;
+        const defaults = {
+            "pref-traditional-engine": "baidu",
+            "pref-baidu-appid":  "",
+            "pref-baidu-key":    "",
+            "pref-youdao-appkey":    "",
+            "pref-youdao-appsecret": "",
+            "pref-azure-key":    "",
+            "pref-azure-region": "",
+            "pref-azure-from":   "en",
+            "pref-azure-to":     "zh-Hans",
+            "pref-google-key":   "",
+            "pref-google-from":  "",
+            "pref-google-to":    "zh-CN"
+        };
+        for (const k of Object.keys(defaults)) {
+            try { Zotero.Prefs.registerDefault(this.PREF_PREFIX + k, defaults[k]); }
+            catch (e) { /* ignore */ }
+        }
+    },
+
+    /**
      * Translate `text` using the vendor chosen by user preference.
      *
      * @param {string} text
@@ -376,3 +403,8 @@ var TraditionalClient = {
         return { source: "google", text: text2, error: null };
     }
 };
+
+// Register default preference values when the script is loaded in Zotero.
+if (typeof Zotero !== "undefined" && Zotero.Prefs) {
+    try { TraditionalClient._registerDefaults(); } catch (e) { /* ignore */ }
+}
