@@ -42,7 +42,20 @@ function copyRecursive(src, dest, exclude = []) {
 }
 
 function copyBuildAssets() {
-  // Create placeholder icon (Zotero 7 expects content/icons/icon@*.png)
+  // If the addon ships real icons, copyAddonFiles() already copied them
+  // into BUILD_DIR/content/icons/, so there is nothing to do.
+  const realIcons = path.join(ADDON_DIR, "content", "icons");
+  if (fs.existsSync(realIcons)) {
+    const files = fs.readdirSync(realIcons).filter((f) => f.startsWith("icon@") && f.endsWith(".png"));
+    if (files.length > 0) {
+      console.log(`  using real icons from ${realIcons} (${files.join(", ")})`);
+      return;
+    }
+  }
+
+  // Fallback: write a 1x1 transparent PNG so the .xpi still has an icons/
+  // entry — Zotero's plugin manager will at least not complain on install.
+  console.log("  no real icons in addon/content/icons/, writing 1x1 placeholder");
   ensureDir(path.join(BUILD_DIR, "content", "icons"));
   const placeholderPng = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",

@@ -2,6 +2,8 @@
 
 一个 Zotero 7/8/9 插件（manifest 范围 7.0.0 – 9.*.*），把大语言模型 (LLM) 接入 PDF 阅读器，支持：
 - 上下文消歧的单词/短语翻译（基于全文 prompt）
+![LLM Assistant icon](docs/images/icon.png)
+
 - 选中文本一键标注到 PDF 上方
 - 双引擎：LLM 主翻译 + 传统机器翻译（百度/有道/Azure/Google）并行
 - 解释选中文本、提问、笔记保存
