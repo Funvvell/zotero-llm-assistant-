@@ -42,7 +42,8 @@ jobs:
         run: |
           node scripts/build.js
           sudo apt-get install -y zip
-          (cd build && zip -r ../dist/zotero-llm-assistant-${{ github.event.repository.name }}.xpi .)
+          VERSION=$(node -e "console.log(require('./addon/manifest.json').version)")
+          (cd build && zip -r "../dist/zotero-llm-assistant-${VERSION}.xpi" .)
 
       - name: Upload .xpi artifact
         uses: actions/upload-artifact@v4

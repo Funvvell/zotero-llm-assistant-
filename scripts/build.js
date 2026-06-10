@@ -7,17 +7,19 @@
 const fs = require("fs");
 const path = require("path");
 
-const ADDON_DIR = path.join(__dirname, "..", "addon");
-const BUILD_DIR = path.join(__dirname, "..", "build");
-const DIST_DIR = path.join(__dirname, "..", "dist");
+const ROOT_DIR = path.join(__dirname, "..");
+const ADDON_DIR = path.join(ROOT_DIR, "addon");
+const BUILD_DIR = path.join(ROOT_DIR, "build");
+const DIST_DIR = path.join(ROOT_DIR, "dist");
 
-const PACKAGE_JSON = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf-8")
+// Read metadata from the authoritative Zotero 7 source: addon/manifest.json
+const MANIFEST = JSON.parse(
+  fs.readFileSync(path.join(ADDON_DIR, "manifest.json"), "utf-8")
 );
 
-const ADDON_ID = PACKAGE_JSON.config.addonID;
-const ADDON_NAME = PACKAGE_JSON.config.addonRef;
-const VERSION = PACKAGE_JSON.version;
+const ADDON_ID = MANIFEST.applications.zotero.id;        // llm-assistant@zotero.org
+const ADDON_NAME = "zotero-llm-assistant";              // used as .xpi filename prefix
+const VERSION = MANIFEST.version;
 
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) {
@@ -40,7 +42,7 @@ function copyRecursive(src, dest, exclude = []) {
 }
 
 function copyBuildAssets() {
-  // Create placeholder icon
+  // Create placeholder icon (Zotero 7 expects content/icons/icon@*.png)
   ensureDir(path.join(BUILD_DIR, "content", "icons"));
   const placeholderPng = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
@@ -50,9 +52,7 @@ function copyBuildAssets() {
   fs.writeFileSync(path.join(BUILD_DIR, "content", "icons", "icon@96.png"), placeholderPng);
 }
 
-function build() {
-  console.log(`Building ${ADDON_NAME} v${VERSION}...`);
-
+function copyAddonFiles() {
   // Clean build directory
   if (fs.existsSync(BUILD_DIR)) {
     fs.rmSync(BUILD_DIR, { recursive: true });
@@ -66,8 +66,14 @@ function build() {
 
   // Copy build assets
   copyBuildAssets();
+}
 
-  // Create XPI (ZIP) file
+function build() {
+  console.log(`Building ${ADDON_NAME} v${VERSION} (${ADDON_ID})...`);
+
+  copyAddonFiles();
+
+  // Try to use archiver if available
   let archiver;
   try {
     archiver = require("archiver");
@@ -76,9 +82,8 @@ function build() {
   }
 
   if (!archiver) {
-    console.log("archiver not found, creating uncompressed build directory instead.");
-    console.log(`Build complete: ${BUILD_DIR}`);
-    console.log("To create .xpi, run: cd build && zip -r ../dist/zotero-llm-assistant-1.0.0.xpi .");
+    console.log("archiver not found, build directory left at:", BUILD_DIR);
+    console.log(`To create .xpi, run: cd build && zip -r ../dist/${ADDON_NAME}-${VERSION}.xpi .`);
     return;
   }
 
@@ -100,23 +105,14 @@ function build() {
   archive.finalize();
 }
 
-// Try to use archiver if available, otherwise just copy files
 try {
   require("archiver");
   build();
 } catch {
-  // No archiver - just do the file copy part
-  console.log("Building without archiver (no .xpi compression)...");
-
-  if (fs.existsSync(BUILD_DIR)) {
-    fs.rmSync(BUILD_DIR, { recursive: true });
-  }
-  ensureDir(BUILD_DIR);
-  ensureDir(DIST_DIR);
-
-  copyRecursive(ADDON_DIR, BUILD_DIR, ["overlay.xul"]);
-  copyBuildAssets();
-
+  // No archiver installed locally - just produce the build directory;
+  // the CI workflow installs zip and packs it itself.
+  console.log("Building without archiver (CI will zip build/ into the .xpi)...");
+  copyAddonFiles();
   console.log(`Build directory created: ${BUILD_DIR}`);
-  console.log("To create .xpi file, run: cd build && zip -r ../dist/zotero-llm-assistant-1.0.0.xpi .");
+  console.log(`To create .xpi file, run: cd build && zip -r ../dist/${ADDON_NAME}-${VERSION}.xpi .`);
 }
