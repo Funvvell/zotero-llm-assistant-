@@ -1,6 +1,6 @@
 # LLM Assistant for Zotero
 
-一个 Zotero 7 插件，把大语言模型 (LLM) 接入 PDF 阅读器，支持：
+一个 Zotero 7/8/9 插件（manifest 范围 7.0.0 – 9.*.*），把大语言模型 (LLM) 接入 PDF 阅读器，支持：
 - 上下文消歧的单词/短语翻译（基于全文 prompt）
 - 选中文本一键标注到 PDF 上方
 - 双引擎：LLM 主翻译 + 传统机器翻译（百度/有道/Azure/Google）并行
@@ -15,7 +15,7 @@
 ### 方式 A：下载预编译 .xpi（推荐）
 
 1. 从 [Releases](https://github.com/你的用户名/zotero-llm-assistant/releases) 下载 `zotero-llm-assistant-1.1.0.xpi`
-2. Zotero 7 → `Tools` → `Plugins` → 齿轮按钮 → `Install Plugin From File`
+2. Zotero（7.0+）→ `Tools` → `Plugins` → 齿轮按钮 → `Install Plugin From File`
 3. 选下载的 .xpi，安装完成
 4. 重启 Zotero
 
