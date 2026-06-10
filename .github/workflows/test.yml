@@ -1,0 +1,61 @@
+name: Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    name: Node test suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install jq (used by build helpers)
+        run: sudo apt-get install -y jq
+
+      - name: Run test-bootstrap
+        run: node scripts/test-bootstrap.js
+
+      - name: Run test-ui-helpers
+        run: node scripts/test-ui-helpers.js
+
+      - name: Run test-ui-source-name
+        run: node scripts/test-ui-source-name.js
+
+      - name: Run test-traditional-client
+        run: node scripts/test-traditional-client.js
+
+      - name: Run test-merge-logic
+        run: node scripts/test-merge-logic.js
+
+      - name: Validate manifest
+        run: node scripts/validate.js
+
+      - name: Build .xpi
+        run: |
+          node scripts/build.js
+          if command -v zip >/dev/null 2>&1; then
+            (cd build && zip -r ../dist/zotero-llm-assistant-${{ github.event.repository.name }}.xpi .)
+          else
+            sudo apt-get install -y zip
+            (cd build && zip -r ../dist/zotero-llm-assistant-${{ github.event.repository.name }}.xpi .)
+          fi
+
+      - name: Upload .xpi artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zotero-llm-assistant-xpi
+          path: dist/zotero-llm-assistant-*.xpi
+          if-no-files-found: error
+          retention-days: 14
