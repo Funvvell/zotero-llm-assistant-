@@ -275,9 +275,55 @@ var TraditionalClient = {
         return { source: "youdao", text: resp.translation.join("\n"), error: null };
     },
 
-    /** @private Microsoft Translator (api.cognitive.microsoft.com) — header auth. */
+    /** @private Microsoft Translator (Azure) — header auth.
+     *  Docs: https://learn.microsoft.com/azure/ai-services/translator/reference/v3-0-translate
+     *  Endpoint: POST https://api.cognitive.microsofttranslator.com/translate
+     *  Headers:  Ocp-Apim-Subscription-Key: <key>
+     *            Ocp-Apim-Subscription-Region: <region> (optional for global)
+     *  Body:     [{ "Text": "<q>" }]  (JSON)
+     */
     async _azure(text, options) {
-        return { source: "azure", text: null, error: "not implemented" };
+        const key    = this._getPref("pref-azure-key");
+        const region = this._getPref("pref-azure-region");
+        if (!key) {
+            return { source: "azure", text: null, error: "azure not configured" };
+        }
+        const from = options.from || this._getPref("pref-azure-from") || "en";
+        const to   = options.to   || this._getPref("pref-azure-to")   || "zh-Hans";
+        const q    = String(text);
+        const url  = `https://api.cognitive.microsofttranslator.com/translate?api-version=3.0&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+
+        const headers = {
+            "Content-Type": "application/json",
+            "Ocp-Apim-Subscription-Key": key
+        };
+        if (region) headers["Ocp-Apim-Subscription-Region"] = region;
+
+        let raw;
+        try {
+            raw = await this._fetch(url, {
+                method: "POST",
+                headers,
+                body: JSON.stringify([{ Text: q }]),
+                timeoutMs: this.DEFAULT_TIMEOUT_MS
+            });
+        } catch (e) {
+            return { source: "azure", text: null, error: `azure network: ${e.message}` };
+        }
+
+        let body;
+        try { body = JSON.parse(raw); } catch (e) {
+            return { source: "azure", text: null, error: "azure: invalid JSON" };
+        }
+        if (!Array.isArray(body) || !body.length) {
+            return { source: "azure", text: null, error: "azure: empty result" };
+        }
+        const translations = body[0].translations;
+        if (!translations || !translations.length) {
+            return { source: "azure", text: null, error: "azure: empty translations" };
+        }
+        const text2 = translations.map(t => t.text).join("\n");
+        return { source: "azure", text: text2, error: null };
     },
 
     /** @private Google Translate (translation.googleapis.com) — ?key=. */

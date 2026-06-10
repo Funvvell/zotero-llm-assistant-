@@ -230,14 +230,6 @@ function test(name, fn) {
     });
 
     // 10) Other vendors are still stubs.
-    await test("azure: stub returns 'not implemented'", async () => {
-        const { client } = loadClient();
-        const r = await client._azure("x", {});
-        assert.strictEqual(r.source, "azure");
-        assert.strictEqual(r.text, null);
-        assert.strictEqual(r.error, "not implemented");
-    });
-
     await test("google: stub returns 'not implemented'", async () => {
         const { client } = loadClient();
         const r = await client._google("x", {});
@@ -384,6 +376,132 @@ function test(name, fn) {
         await client._youdao(q, {});
         // q body param should be the full 50 chars; sign is computed from truncated.
         assert.match(captured.body, new RegExp(`q=${"a".repeat(50)}`));
+    });
+
+    // ============= Azure tests ==============================================
+
+    await test("azure: not configured returns error", async () => {
+        const { client } = loadClient();
+        const r = await client._azure("hello", {});
+        assert.strictEqual(r.source, "azure");
+        assert.strictEqual(r.error, "azure not configured");
+    });
+
+    await test("azure: network error is reported", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-azure-key": "k" },
+            fetchError: true
+        });
+        const r = await client._azure("hello", {});
+        assert.match(r.error, /azure network/);
+    });
+
+    await test("azure: HTTP 401 is reported", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-azure-key": "k" },
+            fetchResponse: { status: 401, body: "unauthorized" }
+        });
+        const r = await client._azure("hello", {});
+        assert.match(r.error, /HTTP 401/);
+    });
+
+    await test("azure: invalid JSON returns error", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-azure-key": "k" },
+            fetchResponse: { status: 200, body: "<html>500</html>" }
+        });
+        const r = await client._azure("hello", {});
+        assert.match(r.error, /invalid JSON/);
+    });
+
+    await test("azure: empty array returns error", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-azure-key": "k" },
+            fetchResponse: { status: 200, body: "[]" }
+        });
+        const r = await client._azure("hello", {});
+        assert.match(r.error, /empty result/);
+    });
+
+    await test("azure: empty translations returns error", async () => {
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-azure-key": "k" },
+            fetchResponse: { status: 200, body: JSON.stringify([{ translations: [] }]) }
+        });
+        const r = await client._azure("hello", {});
+        assert.match(r.error, /empty translations/);
+    });
+
+    await test("azure: success posts to api-version=3.0 with correct headers", async () => {
+        let captured = null;
+        const { client } = loadClient({
+            prefValues: {
+                "extensions.zotero-llm-assistant.pref-azure-key": "k1",
+                "extensions.zotero-llm-assistant.pref-azure-region": "eastasia"
+            },
+            fetchResponse: (url, method, headers, body) => {
+                captured = { url, method, headers, body };
+                return { status: 200, body: JSON.stringify([
+                    { translations: [{ text: "你好", to: "zh-Hans" }] }
+                ]) };
+            }
+        });
+        const r = await client._azure("hello", {});
+        assert.strictEqual(r.text, "你好");
+        assert.strictEqual(r.error, null);
+        assert.strictEqual(captured.method, "POST");
+        assert.match(captured.url, /api-version=3\.0/);
+        assert.match(captured.url, /from=en/);
+        assert.match(captured.url, /to=zh-Hans/);
+        assert.strictEqual(captured.headers["Content-Type"], "application/json");
+        assert.strictEqual(captured.headers["Ocp-Apim-Subscription-Key"], "k1");
+        assert.strictEqual(captured.headers["Ocp-Apim-Subscription-Region"], "eastasia");
+        assert.strictEqual(captured.body, JSON.stringify([{ Text: "hello" }]));
+    });
+
+    await test("azure: omits Region header when not configured", async () => {
+        let captured = null;
+        const { client } = loadClient({
+            prefValues: { "extensions.zotero-llm-assistant.pref-azure-key": "k1" },
+            fetchResponse: (url, method, headers, body) => {
+                captured = { headers };
+                return { status: 200, body: JSON.stringify([
+                    { translations: [{ text: "x", to: "zh-Hans" }] }
+                ]) };
+            }
+        });
+        await client._azure("hi", {});
+        assert.strictEqual(captured.headers["Ocp-Apim-Subscription-Region"], undefined);
+    });
+
+    await test("azure: uses pref-azure-from / pref-azure-to when no override", async () => {
+        let captured = null;
+        const { client } = loadClient({
+            prefValues: {
+                "extensions.zotero-llm-assistant.pref-azure-key": "k1",
+                "extensions.zotero-llm-assistant.pref-azure-from": "de",
+                "extensions.zotero-llm-assistant.pref-azure-to":   "fr"
+            },
+            fetchResponse: (url) => { captured = { url }; return { status: 200, body: JSON.stringify([{ translations: [{ text: "x", to: "fr" }] }]) }; }
+        });
+        await client._azure("hi", {});
+        assert.match(captured.url, /from=de/);
+        assert.match(captured.url, /to=fr/);
+    });
+
+    await test("azure: options.from/to override prefs", async () => {
+        let captured = null;
+        const { client } = loadClient({
+            prefValues: {
+                "extensions.zotero-llm-assistant.pref-azure-key": "k1",
+                "extensions.zotero-llm-assistant.pref-azure-from": "de",
+                "extensions.zotero-llm-assistant.pref-azure-to":   "fr"
+            },
+            fetchResponse: (url) => { captured = { url }; return { status: 200, body: JSON.stringify([{ translations: [{ text: "x", to: "ja" }] }]) }; }
+        });
+        await client._azure("hi", { from: "en", to: "ja" });
+        assert.match(captured.url, /from=en/);
+        assert.match(captured.url, /to=ja/);
     });
 
     console.log(`\n${passed} passed, ${failed} failed.`);
