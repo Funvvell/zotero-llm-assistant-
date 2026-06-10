@@ -85,17 +85,20 @@ const mockZotero = {
   },
 };
 
+// Base directory for resolving content/* scriptloader paths
+const CONTENT_DIR = path.join(__dirname, "..", "addon", "content");
+
 const mockServices = {
   scriptloader: {
-    loadSubScript: (path) => {
-      // path is something like "chrome://zotero-llm-assistant/content/llmClient.js"
-      // Extract the last segment and look in /workspace/addon/content/
-      const match = path.match(/content\/(.+)$/);
+    loadSubScript: (scriptPath) => {
+      // scriptPath is something like "chrome://zotero-llm-assistant/content/llmClient.js"
+      // Extract the last segment and look in CONTENT_DIR
+      const match = scriptPath.match(/content\/(.+)$/);
       if (!match) {
-        console.error("[Services.scriptloader] invalid path:", path);
+        console.error("[Services.scriptloader] invalid path:", scriptPath);
         return;
       }
-      const filePath = "/workspace/addon/content/" + match[1];
+      const filePath = path.join(CONTENT_DIR, match[1]);
       if (!fs.existsSync(filePath)) {
         console.error("[Services.scriptloader] file not found:", filePath);
         return;
@@ -103,9 +106,9 @@ const mockServices = {
       const code = fs.readFileSync(filePath, "utf-8");
       try {
         vm.runInContext(code, sandbox);
-        console.log("[Services.scriptloader] loaded:", path);
+        console.log("[Services.scriptloader] loaded:", scriptPath);
       } catch (e) {
-        console.error("[Services.scriptloader] load failed:", path, e.message);
+        console.error("[Services.scriptloader] load failed:", scriptPath, e.message);
         console.error(e.stack);
       }
     },
@@ -173,7 +176,13 @@ vm.createContext(sandbox);
 
 // Load and execute bootstrap.js
 console.log("=== Loading bootstrap.js ===");
-const bootstrapCode = fs.readFileSync("/workspace/addon/bootstrap.js", "utf-8");
+// Resolve bootstrap.js relative to this script (works regardless of checkout dir)
+const bootstrapPath = path.join(__dirname, "..", "addon", "bootstrap.js");
+if (!fs.existsSync(bootstrapPath)) {
+  console.error("✗ bootstrap.js not found at:", bootstrapPath);
+  process.exit(1);
+}
+const bootstrapCode = fs.readFileSync(bootstrapPath, "utf-8");
 try {
   vm.runInContext(bootstrapCode, sandbox);
   console.log("✓ bootstrap.js loaded");
