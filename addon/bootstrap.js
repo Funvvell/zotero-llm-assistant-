@@ -37,6 +37,23 @@ async function startup({ id, version, resourceURI, rootURI: rURI }, reason) {
     Zotero.logError(`[LLM Assistant] Failed to load scripts: ${e.message}\n${e.stack}`);
   }
 
+  // Register the preferences pane so it shows up under Edit → Settings → LLM Assistant
+  if (Zotero.PreferencePanes && typeof Zotero.PreferencePanes.register === "function") {
+    try {
+      Zotero.PreferencePanes.register({
+        pluginID: _readerListenerPluginID,
+        src: baseURL + "preferences.xhtml",
+        label: "LLM Assistant",
+        // image is optional; skip if we don't have icons
+      });
+      Zotero.debug("[LLM Assistant] Registered preferences pane");
+    } catch (e) {
+      Zotero.logError(`[LLM Assistant] PreferencePanes.register failed: ${e.message}`);
+    }
+  } else {
+    Zotero.logError("[LLM Assistant] Zotero.PreferencePanes not available; Settings tab will be missing");
+  }
+
   // Wait for the main window to be ready
   if (typeof Zotero.uiReadyPromise !== "undefined") {
     try {
@@ -99,6 +116,15 @@ function shutdown({ id, version, resourceURI, rootURI: rURI }, reason) {
   Zotero.debug(`[LLM Assistant] Shutting down (reason=${reason})`);
 
   if (reason === APP_SHUTDOWN) return;
+
+  // Unregister preferences pane
+  if (Zotero.PreferencePanes && typeof Zotero.PreferencePanes.unregister === "function") {
+    try {
+      Zotero.PreferencePanes.unregister(_readerListenerPluginID);
+    } catch (e) {
+      Zotero.debug(`[LLM Assistant] PreferencePanes.unregister failed: ${e.message}`);
+    }
+  }
 
   // Unregister window observer
   if (windowObserver) {
