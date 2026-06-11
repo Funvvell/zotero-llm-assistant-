@@ -172,7 +172,8 @@ Zotero.LLMAssistant.PromptBuilder = {
       `The translation MUST reflect how the term is used in this specific sentence and paper context. ` +
       `Return ONLY JSON (no markdown):\n` +
       `{"type":"word|phrase","original":"${this._escapeQuotes(selected)}",` +
-      `"phonetic":"IPA or empty","partOfSpeech":"n./v./adj./adv./phr.",` +
+      `"phonetic":"IPA phonetic transcription, REQUIRED for English words, e.g. /ɪɡˈzæmpəl/",` +
+      `"partOfSpeech":"词性 REQUIRED, e.g. n./v./adj./adv./prep./phr.",` +
       `"translation":"concise context-appropriate translation","reasoning":"1 sentence explaining the contextual meaning"}\n\n` +
       `Selected: ${selected}\n` +
       `Sentence: ${sentence}\n` +

@@ -204,11 +204,17 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
         Zotero.debug(`[LLM Assistant] Traditional error: ${e.message}`);
       });
 
+      // ── Dictionary API: fetch phonetic + POS for single English words (parallel) ──
+      let dictData = { phonetic: "", partOfSpeech: "", definitions: "" };
+      const isSingleWord = !trimmed.includes(" ") && /^[a-zA-Z'-]+$/.test(trimmed);
+      const dictPromise = isSingleWord ? _fetchDictData(trimmed) : Promise.resolve(dictData);
+
       // ── LLM translation: adds analysis on top ──
       let llmData = null;
       try {
         // Use context captured at selection time (selection may be gone by now)
         const { sentence, surrounding } = _lastContext;
+        Zotero.debug(`[LLM Assistant] LLM prompt context: sentence="${(sentence||'').substring(0,60)}", surrounding=${!!surrounding}`);
         const prompt = prompts().buildContextAwareTranslatePrompt({
           selected: trimmed, sentence: sentence || trimmed, surrounding, fullText: "",
         });
@@ -229,6 +235,14 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
         Zotero.debug(`[LLM Assistant] LLM error: ${e.message}`);
       }
 
+      // Wait for dictionary data (fast, ~1-2s)
+      try {
+        dictData = await Promise.race([
+          dictPromise,
+          new Promise((resolve) => setTimeout(() => resolve({ phonetic: "", partOfSpeech: "", definitions: "" }), 3000)),
+        ]);
+      } catch { /* ignore */ }
+
       if (requestID !== _translateRequestID) return;
 
       // ── Final merged display ──
@@ -247,6 +261,12 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
         };
       }
       if (tradData && llmData) llmData.traditional = tradData;
+
+      // Supplement phonetic/POS from dictionary API (more reliable than LLM)
+      if (llmData && dictData) {
+        if (!llmData.phonetic && dictData.phonetic) llmData.phonetic = dictData.phonetic;
+        if (!llmData.partOfSpeech && dictData.partOfSpeech) llmData.partOfSpeech = dictData.partOfSpeech;
+      }
 
       // Final render: merged result with all data
       _renderPopup(trimmed, llmData, tradData, selectionRect);
@@ -307,9 +327,9 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
     _lastReader = reader || null;
 
     // Capture context IMMEDIATELY while selection still exists in the DOM
-    // Pass the event's doc (iframe contentDocument) directly — do NOT re-query
-    _lastContext = _getSelectionContext(doc);
-    Zotero.debug(`[LLM Assistant] Context captured: sentence="${_lastContext.sentence.substring(0, 80)}", surrounding=${!!_lastContext.surrounding}`);
+    // Pass the event's doc AND the known selected text (from params.annotation.text)
+    _lastContext = _getSelectionContext(doc, selectedText);
+    Zotero.debug(`[LLM Assistant] Context captured: sentence="${_lastContext.sentence.substring(0, 100)}", surrounding=${!!_lastContext.surrounding}`);
 
     if (!selectedText.trim()) return;
 
@@ -763,6 +783,59 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
     }
   }
 
+  /**
+   * Fetch phonetic and part-of-speech from Free Dictionary API.
+   * Like zotero-pdf-translate, uses api.dictionaryapi.dev for reliable
+   * structured dictionary data (phonetic, POS, definitions).
+   * @param {string} word - A single English word
+   * @returns {Promise<{phonetic:string, partOfSpeech:string, definitions:string}>}
+   */
+  async function _fetchDictData(word) {
+    const result = { phonetic: "", partOfSpeech: "", definitions: "" };
+    if (!word || !/^[a-zA-Z'-]+$/.test(word) || word.includes(" ")) return result;
+    try {
+      const url = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`;
+      const raw = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", url, true);
+        xhr.timeout = 6000;
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.responseText);
+          else reject(new Error(`HTTP ${xhr.status}`));
+        };
+        xhr.onerror = () => reject(new Error("network error"));
+        xhr.ontimeout = () => reject(new Error("timeout"));
+        xhr.send();
+      });
+      const data = JSON.parse(raw);
+      if (!Array.isArray(data) || !data.length) return result;
+      const entry = data[0];
+      // Phonetic: prefer the entry-level phonetic, then look in phonetics array
+      result.phonetic = entry.phonetic || "";
+      if (!result.phonetic && entry.phonetics) {
+        const withText = entry.phonetics.find(p => p && p.text);
+        if (withText) result.phonetic = withText.text;
+      }
+      // Part of speech and definitions from meanings
+      if (entry.meanings && entry.meanings.length) {
+        const parts = [];
+        const defs = [];
+        for (const m of entry.meanings) {
+          if (m.partOfSpeech) parts.push(m.partOfSpeech);
+          if (m.definitions && m.definitions.length) {
+            defs.push(m.definitions[0].definition || "");
+          }
+        }
+        result.partOfSpeech = parts.join("/");
+        result.definitions = defs.join("; ");
+      }
+      Zotero.debug(`[LLM Assistant] Dict: phonetic="${result.phonetic}", pos="${result.partOfSpeech}"`);
+    } catch (e) {
+      Zotero.debug(`[LLM Assistant] Dict fetch failed: ${e.message}`);
+    }
+    return result;
+  }
+
   function _showToast(message) {
     try {
       const win = Zotero.getMainWindow();
@@ -819,60 +892,101 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
 
   /**
    * Extract the sentence and surrounding context from the PDF text layer.
-   * @param {Document} doc - The iframe contentDocument from the event (NOT re-queried).
+   * @param {Document} doc - The iframe contentDocument from the event.
+   * @param {string} selectedText - The selected text from params.annotation.text.
    */
-  function _getSelectionContext(doc) {
+  function _getSelectionContext(doc, selectedText) {
     let sentence = "", surrounding = "";
     try {
-      // Use the doc passed from the event — it IS the iframe's contentDocument.
-      // Do NOT re-query via win.document.querySelector("#reader-ui iframe") because
-      // that may find a different iframe or fail entirely.
       if (!doc) {
         Zotero.debug("[LLM Assistant] context: no doc provided");
         return { sentence, surrounding };
       }
-      Zotero.debug(`[LLM Assistant] context: doc provided, body=${!!doc.body}`);
-      const sel = doc.getSelection();
-      if (!sel || sel.rangeCount === 0) {
-        Zotero.debug("[LLM Assistant] context: no selection in doc");
-        return { sentence, surrounding };
-      }
-      const selectedText = sel.toString().trim();
-      Zotero.debug(`[LLM Assistant] context: selectedText="${selectedText.substring(0, 50)}"`);
+      Zotero.debug(`[LLM Assistant] context: selectedText="${(selectedText||'').substring(0,60)}"`);
 
-      // Find the page where the selection lives — each page has its own .textLayer
-      let textLayer = null;
-      try {
-        const range = sel.getRangeAt(0);
-        const pageDiv = range.startContainer?.parentNode?.closest?.(".page");
-        if (pageDiv) {
-          textLayer = pageDiv.querySelector(".textLayer");
-          Zotero.debug(`[LLM Assistant] context: found textLayer in selection's page`);
+      // Strategy: find the full text of the current page and locate the selection within it.
+      // Try multiple approaches since PDF.js DOM structure varies across Zotero versions.
+      let fullText = "";
+
+      // --- Approach 1: Find .textLayer elements ---
+      const textLayers = doc.querySelectorAll(".textLayer");
+      Zotero.debug(`[LLM Assistant] context: .textLayer count=${textLayers.length}`);
+
+      // --- Approach 2: Find .page elements and get their text ---
+      const pages = doc.querySelectorAll(".page");
+      Zotero.debug(`[LLM Assistant] context: .page count=${pages.length}`);
+
+      // --- Approach 3: Dump a sample of body children class names for debugging ---
+      if (doc.body) {
+        const sample = [];
+        const children = doc.body.children;
+        for (let i = 0; i < Math.min(children.length, 10); i++) {
+          sample.push(`${children[i].tagName}.${children[i].className.substring(0, 40)}`);
         }
-      } catch { /* */ }
-      // Fallback: first .textLayer or body
-      if (!textLayer) {
-        textLayer = doc.querySelector(".textLayer") || doc.body;
+        Zotero.debug(`[LLM Assistant] context: body children=[${sample.join(", ")}]`);
       }
-      if (!textLayer) {
-        Zotero.debug("[LLM Assistant] context: no textLayer or body");
+
+      // Normalize the selected text for matching
+      const normalizedSelected = (selectedText || "").replace(/\s+/g, " ").trim();
+
+      // Try to find the page containing the selection
+      if (normalizedSelected && pages.length > 0) {
+        const lowerSelected = normalizedSelected.toLowerCase();
+        for (const page of pages) {
+          // Try .textLayer first, then the page itself
+          const layer = page.querySelector(".textLayer");
+          const source = layer || page;
+          const pageText = (source.innerText || source.textContent || "").replace(/\s+/g, " ").trim();
+          if (pageText.toLowerCase().includes(lowerSelected)) {
+            fullText = pageText;
+            Zotero.debug(`[LLM Assistant] context: found in page (len=${fullText.length})`);
+            break;
+          }
+        }
+      }
+
+      // Fallback: use body text
+      if (!fullText && doc.body) {
+        const bodyText = (doc.body.innerText || doc.body.textContent || "").replace(/\s+/g, " ").trim();
+        if (bodyText.length > 10) {
+          fullText = bodyText;
+          Zotero.debug(`[LLM Assistant] context: using body text (len=${fullText.length})`);
+        }
+      }
+
+      if (!fullText || !normalizedSelected) {
+        Zotero.debug(`[LLM Assistant] context: empty fullText=${!!fullText} selected=${!!normalizedSelected}`);
         return { sentence, surrounding };
       }
-      const fullText = textLayer.innerText || textLayer.textContent || "";
-      Zotero.debug(`[LLM Assistant] context: fullText length=${fullText.length}`);
-      if (!fullText || !selectedText) {
-        Zotero.debug(`[LLM Assistant] context: empty fullText=${!!fullText} selectedText=${!!selectedText}`);
-        return { sentence, surrounding };
-      }
-      const idx = fullText.indexOf(selectedText);
+
+      // Search for the selected text in the full page text
+      const idx = fullText.toLowerCase().indexOf(normalizedSelected.toLowerCase());
+      Zotero.debug(`[LLM Assistant] context: indexOf=${idx}`);
+
       if (idx < 0) {
-        Zotero.debug(`[LLM Assistant] context: selected text not found in fullText`);
-        sentence = fullText.substring(0, 1000);
+        // Try searching for the first few words only (handles whitespace mismatches)
+        const words = normalizedSelected.split(/\s+/);
+        const shortSearch = words.slice(0, Math.min(3, words.length)).join(" ");
+        const idx2 = fullText.toLowerCase().indexOf(shortSearch.toLowerCase());
+        Zotero.debug(`[LLM Assistant] context: partial search "${shortSearch}" indexOf=${idx2}`);
+        if (idx2 >= 0) {
+          // Use partial match position
+          const cs = Math.max(0, idx2 - 300);
+          const ce = Math.min(fullText.length, idx2 + 500);
+          sentence = fullText.substring(cs, ce).replace(/\s+/g, " ").trim();
+          surrounding = sentence;
+          return { sentence, surrounding };
+        }
+        // Last fallback: use the full page text as context
+        sentence = fullText.substring(0, 1500);
+        surrounding = fullText.substring(0, 1500);
         return { sentence, surrounding };
       }
+
+      // Extract the sentence containing the selection
       const SENTENCE_END = /[.!?。！？]\s/g;
       const before = fullText.substring(0, idx);
-      const after = fullText.substring(idx + selectedText.length);
+      const after = fullText.substring(idx + normalizedSelected.length);
       let sentenceStart = 0, m;
       const bRe = new RegExp(SENTENCE_END, "g");
       while ((m = bRe.exec(before)) !== null) sentenceStart = m.index + m[0].length;
@@ -880,10 +994,13 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
       const firstAfter = aRe.exec(after);
       let sentenceEnd = after.length;
       if (firstAfter) sentenceEnd = firstAfter.index + firstAfter[0].length;
-      sentence = (before.substring(sentenceStart) + selectedText + after.substring(0, sentenceEnd)).replace(/\s+/g, " ").trim();
-      const cs = Math.max(0, idx - 200), ce = Math.min(fullText.length, idx + selectedText.length + 200);
+      sentence = (before.substring(sentenceStart) + normalizedSelected + after.substring(0, sentenceEnd)).replace(/\s+/g, " ").trim();
+
+      // Extract surrounding context (±300 chars around the selection)
+      const cs = Math.max(0, idx - 300), ce = Math.min(fullText.length, idx + normalizedSelected.length + 300);
       surrounding = fullText.substring(cs, ce).replace(/\s+/g, " ").trim();
-      Zotero.debug(`[LLM Assistant] context: sentence="${sentence.substring(0, 100)}"`);
+
+      Zotero.debug(`[LLM Assistant] context: sentence="${sentence.substring(0, 120)}"`);
     } catch (e) {
       Zotero.debug(`[LLM Assistant] context error: ${e.message}`);
     }
