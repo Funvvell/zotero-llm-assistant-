@@ -28,6 +28,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
   // Saved selection context for creating native Zotero annotations
   let _lastSelectionAnnotation = null;  // params.annotation from renderTextSelectionPopup
   let _lastReader = null;              // reader instance for getting attachment
+  let _lastContext = { sentence: "", surrounding: "" };  // captured immediately on selection
 
   // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -206,7 +207,8 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
       // ── LLM translation: adds analysis on top ──
       let llmData = null;
       try {
-        const { sentence, surrounding } = _getSelectionContext();
+        // Use context captured at selection time (selection may be gone by now)
+        const { sentence, surrounding } = _lastContext;
         const prompt = prompts().buildContextAwareTranslatePrompt({
           selected: trimmed, sentence: sentence || trimmed, surrounding, fullText: "",
         });
@@ -303,6 +305,10 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
     // Save selection annotation data for creating native Zotero annotations
     _lastSelectionAnnotation = params?.annotation || null;
     _lastReader = reader || null;
+
+    // Capture context IMMEDIATELY while selection still exists in the DOM
+    _lastContext = _getSelectionContext();
+    Zotero.debug(`[LLM Assistant] Context captured: sentence=${!!_lastContext.sentence}, surrounding=${!!_lastContext.surrounding}`);
 
     if (!selectedText.trim()) return;
 
@@ -815,17 +821,33 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
     try {
       const win = Zotero.getMainWindow();
       const iframe = win?.document?.querySelector("#reader-ui iframe");
-      if (!iframe?.contentDocument) return { sentence, surrounding };
+      if (!iframe?.contentDocument) {
+        Zotero.debug("[LLM Assistant] context: no iframe");
+        return { sentence, surrounding };
+      }
       const doc = iframe.contentDocument;
       const sel = doc.getSelection();
-      if (!sel || sel.rangeCount === 0) return { sentence, surrounding };
+      if (!sel || sel.rangeCount === 0) {
+        Zotero.debug("[LLM Assistant] context: no selection");
+        return { sentence, surrounding };
+      }
       const textLayer = doc.querySelector(".textLayer") || doc.body;
-      if (!textLayer) return { sentence, surrounding };
+      if (!textLayer) {
+        Zotero.debug("[LLM Assistant] context: no textLayer");
+        return { sentence, surrounding };
+      }
       const fullText = textLayer.innerText || textLayer.textContent || "";
       const selectedText = sel.toString().trim();
-      if (!fullText || !selectedText) return { sentence, surrounding };
+      if (!fullText || !selectedText) {
+        Zotero.debug(`[LLM Assistant] context: empty fullText=${!!fullText} selectedText=${!!selectedText}`);
+        return { sentence, surrounding };
+      }
       const idx = fullText.indexOf(selectedText);
-      if (idx < 0) return { sentence: fullText.substring(0, 1000), surrounding: "" };
+      if (idx < 0) {
+        Zotero.debug(`[LLM Assistant] context: selected text not found in fullText`);
+        sentence = fullText.substring(0, 1000);
+        return { sentence, surrounding };
+      }
       const SENTENCE_END = /[.!?。！？]\s/g;
       const before = fullText.substring(0, idx);
       const after = fullText.substring(idx + selectedText.length);
