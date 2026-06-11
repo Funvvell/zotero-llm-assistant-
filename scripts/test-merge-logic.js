@@ -17,10 +17,10 @@ const assert = require("assert");
 // ----- Load the source files we need ---------------------------------------
 
 const TRAD = fs.readFileSync(
-    path.join(__dirname, "..", "addon", "content", "traditionalClient.js"), "utf8"
+    path.join(__dirname, "..", "addon", "traditionalClient.js"), "utf8"
 );
 const PB = fs.readFileSync(
-    path.join(__dirname, "..", "addon", "content", "promptBuilder.js"), "utf8"
+    path.join(__dirname, "..", "addon", "promptBuilder.js"), "utf8"
 );
 
 // ----- Mock environment -----------------------------------------------------

@@ -1,0 +1,229 @@
+<!-- LLM Assistant Preferences Pane -->
+<vbox id="zotero-prefpane-llm-assistant"
+      xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      onload="Zotero.LLMAssistant.Prefs.onPaneLoad(event)">
+
+	<vbox class="main-section">
+
+		<!-- ========== LLM API Configuration ========== -->
+		<groupbox>
+			<label><html:h2>LLM API Configuration</html:h2></label>
+
+			<hbox align="center">
+				<label value="Provider Preset:" control="pref-provider-preset" style="width: 120px;"/>
+				<menulist id="pref-provider-preset"
+				          preference="extensions.zotero-llm-assistant.provider-preset"
+				          native="true"
+				          style="flex: 1;">
+					<menupopup>
+						<menuitem label="OpenAI"                    value="openai"/>
+						<menuitem label="DeepSeek"                  value="deepseek"/>
+						<menuitem label="通义千问 (Qwen)"           value="qwen"/>
+						<menuitem label="智谱 (GLM)"                value="glm"/>
+						<menuitem label="Moonshot (月之暗面)"       value="moonshot"/>
+						<menuitem label="百川智能"                   value="baichuan"/>
+						<menuitem label="零一万物"                   value="yi"/>
+						<menuitem label="SiliconFlow (硅基流动)"     value="siliconflow"/>
+						<menuitem label="Claude (via OpenAI proxy)" value="claude"/>
+						<menuitem label="Google Gemini"             value="gemini"/>
+						<menuitem label="Custom"                    value="custom"/>
+					</menupopup>
+				</menulist>
+			</hbox>
+
+			<hbox align="center">
+				<label value="API Endpoint:" control="pref-llm-api-endpoint" style="width: 120px;"/>
+				<html:input id="pref-llm-api-endpoint"
+				            type="text"
+				            preference="extensions.zotero-llm-assistant.api-endpoint"
+				            placeholder="https://api.openai.com/v1"
+				            style="flex: 1; min-width: 300px;"/>
+			</hbox>
+
+			<hbox align="center">
+				<label value="API Key:" control="pref-llm-api-key" style="width: 120px;"/>
+				<html:input id="pref-llm-api-key"
+				            type="password"
+				            preference="extensions.zotero-llm-assistant.api-key"
+				            placeholder="sk-..."
+				            style="flex: 1; min-width: 200px;"/>
+				<button id="btn-fetch-models"
+				        label="Fetch Models"
+				        style="margin-left: 4px;"/>
+			</hbox>
+
+			<hbox align="center">
+				<label value="Available Models:" control="pref-llm-model-list" style="width: 120px;"/>
+				<menulist id="pref-llm-model-list"
+				          native="true"
+				          style="flex: 1;">
+					<menupopup id="pref-llm-model-popup">
+						<menuitem label="(click Fetch Models to load)" value="" disabled="true"/>
+					</menupopup>
+				</menulist>
+			</hbox>
+
+			<hbox align="center">
+				<label value="Model:" control="pref-llm-model" style="width: 120px;"/>
+				<html:input id="pref-llm-model"
+				            type="text"
+				            preference="extensions.zotero-llm-assistant.model"
+				            placeholder="e.g. gpt-4o-mini, deepseek-chat"
+				            style="flex: 1; min-width: 300px;"/>
+				<button id="btn-test-connection"
+				        label="Test Connection"
+				        style="margin-left: 4px;"/>
+			</hbox>
+
+			<hbox id="test-result-box" hidden="true" align="center" style="margin-top: 4px;">
+				<label value="" style="width: 120px;"/>
+				<description id="test-result" style="flex: 1; font-size: 12px;"></description>
+			</hbox>
+		</groupbox>
+
+		<!-- ========== Generation Parameters ========== -->
+		<groupbox>
+			<label><html:h2>Generation Parameters</html:h2></label>
+
+			<hbox align="center">
+				<label value="Max Tokens:" control="pref-llm-max-tokens" style="width: 120px;"/>
+				<html:input id="pref-llm-max-tokens"
+				            type="number"
+				            min="256"
+				            max="8192"
+				            preference="extensions.zotero-llm-assistant.max-tokens"
+				            style="width: 100px;"/>
+			</hbox>
+
+			<hbox align="center">
+				<label value="Temperature:" control="pref-llm-temperature" style="width: 120px;"/>
+				<html:input id="pref-llm-temperature"
+				            type="number"
+				            min="0"
+				            max="2"
+				            step="0.1"
+				            preference="extensions.zotero-llm-assistant.temperature"
+				            style="width: 100px;"/>
+			</hbox>
+		</groupbox>
+
+		<!-- ========== Output Settings ========== -->
+		<groupbox>
+			<label><html:h2>Output Settings</html:h2></label>
+
+			<hbox align="center">
+				<label value="Output Language:" control="pref-llm-language" style="width: 120px;"/>
+				<menulist id="pref-llm-language"
+				          preference="extensions.zotero-llm-assistant.language"
+				          native="true">
+					<menupopup>
+						<menuitem label="Chinese" value="Chinese"/>
+						<menuitem label="English" value="English"/>
+						<menuitem label="Japanese" value="Japanese"/>
+						<menuitem label="Korean" value="Korean"/>
+					</menupopup>
+				</menulist>
+			</hbox>
+		</groupbox>
+
+		<!-- ========== Traditional Translation API ========== -->
+		<groupbox>
+			<label><html:h2>Traditional Translation Engine (parallel to LLM)</html:h2></label>
+
+			<description style="margin-bottom: 6px; color: #666;">
+				Choose one vendor to run alongside the LLM. The plugin shows both
+				translations in the PDF tooltip. MyMemory is free and requires no API key.
+				Other vendors need credentials configured below.
+			</description>
+
+			<hbox align="center">
+				<label value="Active Engine:" control="pref-traditional-engine" style="width: 120px;"/>
+				<menulist id="pref-traditional-engine"
+				          preference="extensions.zotero-llm-assistant.pref-traditional-engine"
+				          native="true">
+					<menupopup>
+						<menuitem label="MyMemory (Free, no key needed)"  value="mymemory"/>
+						<menuitem label="Baidu Translate"  value="baidu"/>
+						<menuitem label="Youdao Translate" value="youdao"/>
+						<menuitem label="Microsoft Azure"  value="azure"/>
+						<menuitem label="Google Translate" value="google"/>
+					</menupopup>
+				</menulist>
+				<button id="btn-test-traditional"
+				        label="Test Engine"
+				        style="margin-left: 4px;"/>
+			</hbox>
+
+			<hbox id="traditional-test-result-box" hidden="true" align="center" style="margin-top: 4px;">
+				<label value="" style="width: 120px;"/>
+				<description id="traditional-test-result" style="flex: 1; font-size: 12px;"></description>
+			</hbox>
+
+			<!-- Baidu -->
+			<html:h3 style="margin-top: 10px; margin-bottom: 4px;">Baidu</html:h3>
+			<hbox align="center">
+				<label value="App ID:" control="pref-baidu-appid" style="width: 120px;"/>
+				<html:input id="pref-baidu-appid"
+				            type="text"
+				            preference="extensions.zotero-llm-assistant.pref-baidu-appid"
+				            placeholder="Baidu APP ID"
+				            style="flex: 1; min-width: 300px;"/>
+			</hbox>
+			<hbox align="center">
+				<label value="Secret Key:" control="pref-baidu-key" style="width: 120px;"/>
+				<html:input id="pref-baidu-key"
+				            type="password"
+				            preference="extensions.zotero-llm-assistant.pref-baidu-key"
+				            style="flex: 1; min-width: 300px;"/>
+			</hbox>
+
+			<!-- Youdao -->
+			<html:h3 style="margin-top: 10px; margin-bottom: 4px;">Youdao</html:h3>
+			<hbox align="center">
+				<label value="AppKey:" control="pref-youdao-appkey" style="width: 120px;"/>
+				<html:input id="pref-youdao-appkey"
+				            type="text"
+				            preference="extensions.zotero-llm-assistant.pref-youdao-appkey"
+				            placeholder="Youdao AppKey"
+				            style="flex: 1; min-width: 300px;"/>
+			</hbox>
+			<hbox align="center">
+				<label value="AppSecret:" control="pref-youdao-appsecret" style="width: 120px;"/>
+				<html:input id="pref-youdao-appsecret"
+				            type="password"
+				            preference="extensions.zotero-llm-assistant.pref-youdao-appsecret"
+				            style="flex: 1; min-width: 300px;"/>
+			</hbox>
+
+			<!-- Azure -->
+			<html:h3 style="margin-top: 10px; margin-bottom: 4px;">Azure</html:h3>
+			<hbox align="center">
+				<label value="Subscription Key:" control="pref-azure-key" style="width: 120px;"/>
+				<html:input id="pref-azure-key"
+				            type="password"
+				            preference="extensions.zotero-llm-assistant.pref-azure-key"
+				            style="flex: 1; min-width: 300px;"/>
+			</hbox>
+			<hbox align="center">
+				<label value="Region:" control="pref-azure-region" style="width: 120px;"/>
+				<html:input id="pref-azure-region"
+				            type="text"
+				            preference="extensions.zotero-llm-assistant.pref-azure-region"
+				            placeholder="e.g. eastasia (optional for global)"
+				            style="flex: 1; min-width: 300px;"/>
+			</hbox>
+
+			<!-- Google -->
+			<html:h3 style="margin-top: 10px; margin-bottom: 4px;">Google</html:h3>
+			<hbox align="center">
+				<label value="API Key:" control="pref-google-key" style="width: 120px;"/>
+				<html:input id="pref-google-key"
+				            type="password"
+				            preference="extensions.zotero-llm-assistant.pref-google-key"
+				            style="flex: 1; min-width: 300px;"/>
+			</hbox>
+		</groupbox>
+
+	</vbox>
+</vbox>

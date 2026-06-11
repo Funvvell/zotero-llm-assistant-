@@ -85,20 +85,20 @@ const mockZotero = {
   },
 };
 
-// Base directory for resolving content/* scriptloader paths
-const CONTENT_DIR = path.join(__dirname, "..", "addon", "content");
+// Base directory for resolving script files at plugin root
+const ADDON_DIR = path.join(__dirname, "..", "addon");
 
 const mockServices = {
   scriptloader: {
     loadSubScript: (scriptPath) => {
-      // scriptPath is something like "chrome://zotero-llm-assistant/content/llmClient.js"
-      // Extract the last segment and look in CONTENT_DIR
-      const match = scriptPath.match(/content\/(.+)$/);
+      // scriptPath is something like "chrome://zotero-llm-assistant/llmClient.js"
+      // Extract the last segment and look in ADDON_DIR
+      const match = scriptPath.match(/[^/]+$/);
       if (!match) {
         console.error("[Services.scriptloader] invalid path:", scriptPath);
         return;
       }
-      const filePath = path.join(CONTENT_DIR, match[1]);
+      const filePath = path.join(ADDON_DIR, match[0]);
       if (!fs.existsSync(filePath)) {
         console.error("[Services.scriptloader] file not found:", filePath);
         return;
@@ -197,7 +197,7 @@ const data = {
   id: "llm-assistant@example.com",
   version: "1.0.0",
   resourceURI: { spec: "resource://llm-assistant/" },
-  rootURI: "chrome://zotero-llm-assistant/content/",
+  rootURI: "chrome://zotero-llm-assistant/",
 };
 
 (async () => {

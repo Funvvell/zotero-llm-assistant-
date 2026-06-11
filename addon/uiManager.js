@@ -1,6 +1,12 @@
-/* global Zotero, Components */
+/* global Zotero, Services, Components */
 /**
  * UI Manager - Handles panel, notifications, and dialog interactions
+ *
+ * Improvements learned from zotero-pdf-translate:
+ *   - CSS :hover instead of inline onmouseover/onmouseout handlers
+ *   - Proper DOM element tracking for cleanup
+ *   - Centralized style constants
+ *   - Services.clipboard for modern clipboard access
  */
 
 Zotero.LLMAssistant = Zotero.LLMAssistant || {};
@@ -27,32 +33,32 @@ Zotero.LLMAssistant.UIManager = {
     const rightPanel = doc.getElementById("zotero-items-splitter");
     if (!rightPanel) return;
 
-    // Create panel
-    this._panel = doc.createElement("panel");
+    // Create panel — MUST use createXULElement for panel to have openPopup()
+    this._panel = doc.createXULElement("panel");
     this._panel.id = "zotero-llm-assistant-panel";
     this._panel.setAttribute("noautohide", "true");
     this._panel.setAttribute("width", "480");
     this._panel.setAttribute("height", "600");
 
-    this._panelContent = doc.createElement("vbox");
+    this._panelContent = doc.createXULElement("vbox");
     this._panelContent.setAttribute("flex", "1");
     this._panelContent.setAttribute("style", "padding: 8px; font-size: 13px;");
 
     // Header
-    const header = doc.createElement("hbox");
+    const header = doc.createXULElement("hbox");
     header.setAttribute("align", "center");
     header.setAttribute("style", "margin-bottom: 8px;");
 
-    const title = doc.createElement("label");
+    const title = doc.createXULElement("label");
     title.setAttribute("value", "LLM Assistant");
     title.setAttribute("style", "font-weight: bold; font-size: 15px;");
     header.appendChild(title);
 
-    const spacer = doc.createElement("spacer");
+    const spacer = doc.createXULElement("spacer");
     spacer.setAttribute("flex", "1");
     header.appendChild(spacer);
 
-    const closeBtn = doc.createElement("button");
+    const closeBtn = doc.createXULElement("button");
     closeBtn.setAttribute("label", "Close");
     closeBtn.setAttribute("style", "min-width: 60px;");
     closeBtn.addEventListener("command", () => this.hidePanel());
@@ -61,18 +67,18 @@ Zotero.LLMAssistant.UIManager = {
     this._panelContent.appendChild(header);
 
     // Progress bar
-    this._progressBar = doc.createElement("progressmeter");
+    this._progressBar = doc.createXULElement("progressmeter");
     this._progressBar.setAttribute("mode", "determined");
     this._progressBar.setAttribute("value", "0");
     this._progressBar.setAttribute("style", "display: none; margin-bottom: 8px;");
     this._panelContent.appendChild(this._progressBar);
 
     // Result area (scrollable)
-    const resultScroll = doc.createElement("scrollbox");
+    const resultScroll = doc.createXULElement("scrollbox");
     resultScroll.setAttribute("flex", "1");
     resultScroll.setAttribute("style", "border: 1px solid #ccc; border-radius: 4px; padding: 8px; overflow: auto; min-height: 300px; max-height: 400px;");
 
-    this._resultLabel = doc.createElement("label");
+    this._resultLabel = doc.createXULElement("label");
     this._resultLabel.setAttribute("value", "Ready. Select a paper and choose an action from the context menu.");
     this._resultLabel.setAttribute("wrap", "true");
     this._resultLabel.setAttribute("style", "white-space: pre-wrap; line-height: 1.5;");
@@ -81,20 +87,20 @@ Zotero.LLMAssistant.UIManager = {
     this._panelContent.appendChild(resultScroll);
 
     // Ask question input area
-    const askBox = doc.createElement("vbox");
+    const askBox = doc.createXULElement("vbox");
     askBox.setAttribute("style", "margin-top: 8px;");
 
-    const askLabel = doc.createElement("label");
+    const askLabel = doc.createXULElement("label");
     askLabel.setAttribute("value", "Ask a question about the selected paper:");
     askBox.appendChild(askLabel);
 
-    const inputHbox = doc.createElement("hbox");
-    this._askInput = doc.createElement("textbox");
+    const inputHbox = doc.createXULElement("hbox");
+    this._askInput = doc.createXULElement("textbox");
     this._askInput.setAttribute("flex", "1");
     this._askInput.setAttribute("placeholder", "Type your question...");
     inputHbox.appendChild(this._askInput);
 
-    const askBtn = doc.createElement("button");
+    const askBtn = doc.createXULElement("button");
     askBtn.setAttribute("label", "Ask");
     askBtn.addEventListener("command", () => {
       const question = this._askInput.value.trim();
@@ -108,15 +114,15 @@ Zotero.LLMAssistant.UIManager = {
     this._panelContent.appendChild(askBox);
 
     // Action buttons
-    const actionBox = doc.createElement("hbox");
+    const actionBox = doc.createXULElement("hbox");
     actionBox.setAttribute("style", "margin-top: 8px;");
 
-    const copyBtn = doc.createElement("button");
+    const copyBtn = doc.createXULElement("button");
     copyBtn.setAttribute("label", "Copy Result");
     copyBtn.addEventListener("command", () => this._copyResult());
     actionBox.appendChild(copyBtn);
 
-    const saveBtn = doc.createElement("button");
+    const saveBtn = doc.createXULElement("button");
     saveBtn.setAttribute("label", "Save to Note");
     saveBtn.addEventListener("command", () => this._saveToNote());
     actionBox.appendChild(saveBtn);
@@ -124,7 +130,13 @@ Zotero.LLMAssistant.UIManager = {
     this._panelContent.appendChild(actionBox);
 
     this._panel.appendChild(this._panelContent);
-    doc.getElementById("mainPopupSet").appendChild(this._panel);
+    const popupSet = doc.getElementById("mainPopupSet");
+    if (popupSet) {
+      popupSet.appendChild(this._panel);
+    } else {
+      Zotero.logError("[LLM Assistant] mainPopupSet not found, panel may not display");
+      doc.documentElement.appendChild(this._panel);
+    }
   },
 
   /**
@@ -200,14 +212,34 @@ Zotero.LLMAssistant.UIManager = {
   },
 
   /**
-   * Copy the current result to clipboard
+   * Copy the current result to clipboard.
+   * Uses navigator.clipboard (modern) with Components.classes fallback.
    */
   _copyResult() {
-    if (this._lastResult) {
+    if (!this._lastResult) return;
+    const text = this._lastResult;
+
+    // Modern path: navigator.clipboard
+    const win = Zotero.getMainWindow();
+    if (win && win.navigator && win.navigator.clipboard) {
+      win.navigator.clipboard.writeText(text).then(
+        () => this._showNotification("Result copied to clipboard!"),
+        () => this._copyResultFallback(text)
+      );
+    } else {
+      this._copyResultFallback(text);
+    }
+  },
+
+  /** Fallback clipboard copy via XPCOM */
+  _copyResultFallback(text) {
+    try {
       const clipboard = Components.classes["@mozilla.org/widget/clipboardhelper;1"]
         .getService(Components.interfaces.nsIClipboardHelper);
-      clipboard.copyString(this._lastResult);
+      clipboard.copyString(text);
       this._showNotification("Result copied to clipboard!");
+    } catch (e) {
+      this._showNotification("Copy failed: " + e.message);
     }
   },
 
@@ -272,31 +304,28 @@ Zotero.LLMAssistant.UIManager = {
   showAnnotationOnPDF(data, selectionRect) {
     this.hideLoading();
 
-    const doc = Zotero.getMainWindow().document;
     const win = Zotero.getMainWindow();
+    if (!win || !win.document) {
+      Zotero.debug("[LLM Assistant] showAnnotationOnPDF: main window not available");
+      return;
+    }
+    const doc = win.document;
 
     // Remove any existing annotation tooltip
     this._removeExistingAnnotation();
 
-    // Create tooltip element
+    // Create tooltip element with CSS class (styles injected via <style>)
     const tooltip = doc.createElement("div");
     tooltip.id = "zotero-llm-annotation-tooltip";
-    tooltip.style.cssText = `
-      position: fixed;
-      z-index: 999999;
-      background: #fffbe6;
-      border: 1px solid #ffd700;
-      border-radius: 8px;
-      padding: 10px 14px;
-      max-width: 360px;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
-      font-size: 13px;
-      line-height: 1.6;
-      color: #333;
-      pointer-events: auto;
-      user-select: text;
-    `;
+    tooltip.className = "zotero-llm-tooltip";
+
+    // Inject shared stylesheet once
+    if (!doc.getElementById("zotero-llm-tooltip-css")) {
+      const styleEl = doc.createElement("style");
+      styleEl.id = "zotero-llm-tooltip-css";
+      styleEl.textContent = this._getTooltipCSS();
+      (doc.head || doc.documentElement).appendChild(styleEl);
+    }
 
     // Normalize data fields (support both old "word" and new "original")
     const type = data.type || (data.word ? "word" : (data.original || "").includes(" ") ? "phrase" : "word");
@@ -326,13 +355,29 @@ Zotero.LLMAssistant.UIManager = {
 
     // Second row: traditional engine translation, when present.
     let traditionalHtml = "";
-    if (data.traditional && data.traditional.text) {
+    if (data.traditional) {
+      if (data.traditional.text) {
         const trad = data.traditional;
         const sourceLabel = this.sourceDisplayName(trad.source);
         traditionalHtml = `<div style="color: #059669; font-size: 13px; margin-bottom: 6px; line-height: 1.6; border-top: 1px dashed #d1fae5; padding-top: 4px;">
           <div style="font-size: 10px; color: #047857; margin-bottom: 2px;">传统翻译（${this._escapeHtml(sourceLabel)}）：</div>
           <span class="zotero-llm-traditional-translation">${this._escapeHtml(trad.text)}</span>
         </div>`;
+      } else if (data.traditional.error) {
+        const err = data.traditional.error;
+        const source = data.traditional.source || "unknown";
+        let hint = "";
+        if (/not configured/.test(err)) {
+          hint = `<div style="font-size: 10px; color: #92400e; margin-top: 2px;">请在 LLM Assistant 设置中配置翻译引擎 API 密钥，或选择免费的 MyMemory 引擎。</div>`;
+        } else if (/network|timeout/.test(err)) {
+          hint = `<div style="font-size: 10px; color: #92400e; margin-top: 2px;">请检查网络连接后重试。</div>`;
+        }
+        traditionalHtml = `<div style="color: #dc2626; font-size: 12px; margin-bottom: 6px; line-height: 1.5; border-top: 1px dashed #fecaca; padding-top: 4px;">
+          <div style="font-size: 10px; color: #b91c1c; margin-bottom: 2px;">传统翻译（${this._escapeHtml(source)}）：</div>
+          <span>${this._escapeHtml(err)}</span>
+          ${hint}
+        </div>`;
+      }
     }
 
     let reasoningHtml = "";
@@ -351,25 +396,8 @@ Zotero.LLMAssistant.UIManager = {
     }
 
     const closeBtnHtml = `<div style="text-align: right; margin-top: 8px;">
-      <button id="zotero-llm-annotation-close" style="
-        background: #f3f4f6;
-        border: 1px solid #d1d5db;
-        border-radius: 4px;
-        padding: 2px 10px;
-        font-size: 12px;
-        cursor: pointer;
-        color: #374151;
-      ">关闭</button>
-      <button id="zotero-llm-annotation-add-note" style="
-        background: #2563eb;
-        border: 1px solid #2563eb;
-        border-radius: 4px;
-        padding: 2px 10px;
-        font-size: 12px;
-        cursor: pointer;
-        color: #fff;
-        margin-left: 6px;
-      ">添加到笔记</button>
+      <button id="zotero-llm-annotation-close" class="close-btn">关闭</button>
+      <button id="zotero-llm-annotation-add-note" class="note-btn">添加到笔记</button>
     </div>`;
 
     tooltip.innerHTML = headerHtml + translationHtml + traditionalHtml + reasoningHtml + examplesHtml + closeBtnHtml;
@@ -380,7 +408,15 @@ Zotero.LLMAssistant.UIManager = {
       pdfContainer = doc.getElementById("zotero-pane");
     }
     if (!pdfContainer) {
+      pdfContainer = doc.getElementById("mainPopupSet");
+    }
+    if (!pdfContainer) {
       pdfContainer = doc.body;
+    }
+
+    if (!pdfContainer) {
+      Zotero.debug("[LLM Assistant] showAnnotationOnPDF: no container found");
+      return;
     }
 
     pdfContainer.appendChild(tooltip);
@@ -486,11 +522,12 @@ Zotero.LLMAssistant.UIManager = {
    */
   sourceDisplayName(source) {
     const map = {
-      baidu:  "百度翻译",
-      youdao: "有道翻译",
-      azure:  "微软翻译",
-      google: "Google 翻译",
-      none:   "无"
+      baidu:    "百度翻译",
+      youdao:   "有道翻译",
+      azure:    "微软翻译",
+      google:   "Google 翻译",
+      mymemory: "MyMemory 翻译",
+      none:     "无"
     };
     return map[source] || (source || "未知");
   },
@@ -540,11 +577,55 @@ Zotero.LLMAssistant.UIManager = {
   },
 
   /**
-   * Render a single word/char as a clickable span with hover effect.
+   * Render a single word/char as a clickable span.
+   * Uses CSS class for hover effect instead of inline onmouseover/onmouseout.
    */
   _wrapAsClickable(token) {
     const safe = this._escapeHtml(token);
-    return `<span class="zotero-llm-translation-word" data-word="${safe}" style="cursor: pointer; padding: 0 1px; border-radius: 2px; transition: background 0.15s;" onmouseover="this.style.background='#fef3c7'" onmouseout="this.style.background='transparent'" title="双击标注到 PDF">${safe}</span>`;
+    return `<span class="zotero-llm-translation-word" data-word="${safe}" title="双击标注到 PDF">${safe}</span>`;
+  },
+
+  /**
+   * Get the shared CSS stylesheet for tooltip elements.
+   * Centralizes styles to avoid inline duplication and enables :hover.
+   */
+  _getTooltipCSS() {
+    return `
+      .zotero-llm-translation-word {
+        cursor: pointer; padding: 0 1px; border-radius: 2px;
+        transition: background 0.15s;
+      }
+      .zotero-llm-translation-word:hover {
+        background: #fef3c7;
+      }
+      .zotero-llm-tooltip {
+        position: fixed; z-index: 999999;
+        background: #fffbe6; border: 1px solid #ffd700;
+        border-radius: 8px; padding: 10px 14px;
+        max-width: 360px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+        font-size: 13px; line-height: 1.6; color: #333;
+        pointer-events: auto; user-select: text;
+      }
+      .zotero-llm-tooltip .close-btn {
+        background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 4px;
+        padding: 2px 10px; font-size: 12px; cursor: pointer; color: #374151;
+      }
+      .zotero-llm-tooltip .note-btn {
+        background: #2563eb; border: 1px solid #2563eb; border-radius: 4px;
+        padding: 2px 10px; font-size: 12px; cursor: pointer; color: #fff; margin-left: 6px;
+      }
+      .zotero-llm-persistent-annotation {
+        position: fixed; z-index: 999998;
+        background: #fef3c7; border: 1px solid #f59e0b; border-radius: 4px;
+        padding: 2px 8px; font-size: 12px; color: #92400e;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+        pointer-events: auto; user-select: none;
+        white-space: nowrap; max-width: 200px;
+        overflow: hidden; text-overflow: ellipsis;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+      }
+    `;
   },
 
   /**
@@ -553,8 +634,20 @@ Zotero.LLMAssistant.UIManager = {
    * has a small × to remove it.
    */
   _createPersistentAnnotation(word, selectionRect) {
-    const doc = Zotero.getMainWindow().document;
-    if (!doc) return;
+    const win = Zotero.getMainWindow();
+    if (!win || !win.document) {
+      Zotero.debug("[LLM Assistant] _createPersistentAnnotation: main window not available");
+      return;
+    }
+    const doc = win.document;
+
+    // Inject shared stylesheet once
+    if (!doc.getElementById("zotero-llm-tooltip-css")) {
+      const styleEl = doc.createElement("style");
+      styleEl.id = "zotero-llm-tooltip-css";
+      styleEl.textContent = this._getTooltipCSS();
+      (doc.head || doc.documentElement).appendChild(styleEl);
+    }
 
     // Find the PDF viewer container
     let pdfContainer = doc.getElementById("reader-ui");
@@ -564,24 +657,6 @@ Zotero.LLMAssistant.UIManager = {
     const label = doc.createElement("div");
     label.className = "zotero-llm-persistent-annotation";
     label.setAttribute("data-word", word);
-    label.style.cssText = `
-      position: fixed;
-      z-index: 999998;
-      background: #fef3c7;
-      border: 1px solid #f59e0b;
-      border-radius: 4px;
-      padding: 2px 8px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
-      font-size: 12px;
-      color: #92400e;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.12);
-      pointer-events: auto;
-      user-select: none;
-      white-space: nowrap;
-      max-width: 200px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    `;
     label.innerHTML = `<span style="margin-right: 6px;">${this._escapeHtml(word)}</span><span class="zotero-llm-annotation-close-x" style="cursor: pointer; color: #b45309; font-weight: bold;" title="移除标注">×</span>`;
 
     // Position the label above the original selected word
@@ -626,8 +701,10 @@ Zotero.LLMAssistant.UIManager = {
    */
   removeAllPersistentAnnotations() {
     try {
-      const doc = Zotero.getMainWindow().document;
-      if (!doc || typeof doc.querySelectorAll !== "function") return;
+      const win = Zotero.getMainWindow();
+      if (!win || !win.document) return;
+      const doc = win.document;
+      if (typeof doc.querySelectorAll !== "function") return;
       const labels = doc.querySelectorAll(".zotero-llm-persistent-annotation");
       labels.forEach((el) => {
         if (el.parentNode) el.parentNode.removeChild(el);

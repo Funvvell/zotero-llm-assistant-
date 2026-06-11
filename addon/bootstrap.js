@@ -1,185 +1,159 @@
-/* global Zotero, Services */
+/* global Zotero, Services, Components, APP_SHUTDOWN */
 /**
- * Bootstrap file for LLM Assistant plugin
- * Zotero 7/8/9 format: uses { rootURI, id, version } object as first argument.
+ * Bootstrap file for LLM Assistant plugin.
+ * Zotero 7/8/9 bootstrapped extension.
  *
- * Reader-internal UI (the right-click popup that appears when you select
- * text in a PDF) is injected via the official Zotero.Reader API
- * (registerEventListener), not by manually creating XUL <menuitem>s.
- * Manual XUL injection stopped working when Zotero moved to the
- * Firefox 140 platform baseline (Zotero 8 / 9). See:
- *   https://windingwind.github.io/doc-for-zotero-plugin-dev/main/reader-ui-injection
+ * Architecture learned from zotero-pdf-translate (windingwind):
+ *   - Chrome registration via amIAddonManagerStartup.registerChrome()
+ *     so that chrome://llm-assistant/content/... resolves to our chrome/content/ dir
+ *   - onMainWindowLoad / onMainWindowUnload top-level lifecycle hooks
+ *     (Zotero calls these automatically for each main window)
+ *   - Triple-promise wait (initializationPromise + unlockPromise + uiReadyPromise)
+ *   - Clean shutdown with APP_SHUTDOWN early-return
+ *
+ * Directory layout (flat, no chrome.manifest):
+ *   addon/
+ *     manifest.json
+ *     bootstrap.js
+ *     prefs.js
+ *     preferences.xhtml
+ *     preferences.js
+ *     llmClient.js, promptBuilder.js, uiManager.js, traditionalClient.js, overlay.js
+ *     chrome/content/icons/icon@48.png, icon@96.png, ...
  */
 
-let rootURI;
-let windowObserver;
+var chromeHandle;
 
-// Reader popup listeners are auto-removed on plugin unload, so we only
-// need to track them for diagnostics.
-const _readerListenerPluginID = "llm-assistant@example.com";
+const ADDON_ID = "llm-assistant@example.com";
+const ADDON_REF = "llm-assistant";
+const PREF_PREFIX = "extensions.zotero-llm-assistant.";
+
+let rootURI;
+let _prefsPaneID = null;
+let _readerTabObserver = null;
+let _windowObserver = null;
+
+// ── Lifecycle ─────────────────────────────────────────────────────────
 
 function install(data, reason) {}
 
 async function startup({ id, version, resourceURI, rootURI: rURI }, reason) {
   rootURI = rURI;
-  Zotero.debug(`[LLM Assistant] Starting up (id=${id}, version=${version})`);
+  if (!rootURI) {
+    rootURI = resourceURI.spec;
+  }
+  const base = rootURI.endsWith("/") ? rootURI : rootURI + "/";
 
-  // Load modules (rootURI ends with /content/)
-  const baseURL = rootURI.endsWith("/") ? rootURI : rootURI + "/";
-  const scriptURL = (file) => baseURL + file;
+  Zotero.debug(`[LLM Assistant] Starting up (id=${id}, v${version})`);
+  Zotero.debug(`[LLM Assistant] rootURI=${rootURI}`);
+
+  // Wait for Zotero core to be ready
+  await Zotero.initializationPromise;
+
+  // ── Chrome registration ──
+  // This maps chrome://llm-assistant/content/... → rootURI/chrome/content/...
+  // Critical for icon display in the Add-on Manager and for XUL/XHTML loading.
   try {
-    Services.scriptloader.loadSubScript(scriptURL("llmClient.js"));
-    Services.scriptloader.loadSubScript(scriptURL("promptBuilder.js"));
-    Services.scriptloader.loadSubScript(scriptURL("uiManager.js"));
-    Services.scriptloader.loadSubScript(scriptURL("traditionalClient.js"));
-    Services.scriptloader.loadSubScript(scriptURL("overlay.js"));
+    const aomStartup = Components.classes[
+      "@mozilla.org/addons/addon-manager-startup;1"
+    ].getService(Components.interfaces.amIAddonManagerStartup);
+    const manifestURI = Services.io.newURI(rootURI + "manifest.json");
+    chromeHandle = aomStartup.registerChrome(manifestURI, [
+      ["content", ADDON_REF, rootURI + "chrome/content/"],
+    ]);
+    Zotero.debug(`[LLM Assistant] Chrome registered: chrome://${ADDON_REF}/content/`);
   } catch (e) {
-    Zotero.logError(`[LLM Assistant] Failed to load scripts: ${e.message}\n${e.stack}`);
+    Zotero.logError(`[LLM Assistant] Chrome registration failed: ${e.message}`);
   }
 
-  // Register the preferences pane so it shows up under Edit → Settings → LLM Assistant
+  // ── Load modules into global scope ──
+  const modules = [
+    "llmClient.js",
+    "promptBuilder.js",
+    "uiManager.js",
+    "traditionalClient.js",
+    "overlay.js",
+    "preferences.js",
+  ];
+  for (const m of modules) {
+    try {
+      Services.scriptloader.loadSubScript(base + m);
+    } catch (e) {
+      Zotero.logError(`[LLM Assistant] Failed to load ${m}: ${e.message}\n${e.stack}`);
+    }
+  }
+
+  // ── Register preferences pane ──
   if (Zotero.PreferencePanes && typeof Zotero.PreferencePanes.register === "function") {
     try {
-      Zotero.PreferencePanes.register({
-        pluginID: _readerListenerPluginID,
-        src: baseURL + "preferences.xhtml",
+      _prefsPaneID = await Zotero.PreferencePanes.register({
+        pluginID: ADDON_ID,
+        src: base + "preferences.xhtml",
         label: "LLM Assistant",
-        // image is optional; skip if we don't have icons
       });
-      Zotero.debug("[LLM Assistant] Registered preferences pane");
+      Zotero.debug(`[LLM Assistant] Preferences pane registered (id=${_prefsPaneID})`);
     } catch (e) {
-      Zotero.logError(`[LLM Assistant] PreferencePanes.register failed: ${e.message}`);
+      Zotero.logError(`[LLM Assistant] PreferencePanes.register failed: ${e.message}\n${e.stack}`);
     }
   } else {
-    Zotero.logError("[LLM Assistant] Zotero.PreferencePanes not available; Settings tab will be missing");
+    Zotero.logError("[LLM Assistant] PreferencePanes not available; Settings will be missing");
   }
 
-  // Wait for the main window to be ready
-  if (typeof Zotero.uiReadyPromise !== "undefined") {
-    try {
-      await Zotero.uiReadyPromise;
-    } catch (e) {
-      Zotero.logError(`[LLM Assistant] uiReadyPromise failed: ${e.message}`);
-    }
+  // ── Wait for full UI readiness (triple-promise pattern) ──
+  try {
+    await Promise.all([
+      Zotero.initializationPromise,
+      Zotero.unlockPromise,
+      Zotero.uiReadyPromise,
+    ]);
+  } catch (e) {
+    Zotero.logError(`[LLM Assistant] Startup promises failed: ${e.message}`);
   }
 
-  // Register reader-internal popup (PDF text selection) items.
-  // This is the Zotero 7+ official API and works on 8/9.
+  // ── Register PDF reader text-selection popup ──
   if (Zotero.Reader && typeof Zotero.Reader.registerEventListener === "function") {
     try {
       Zotero.Reader.registerEventListener(
         "renderTextSelectionPopup",
         onRenderTextSelectionPopup,
-        _readerListenerPluginID
+        ADDON_ID
       );
-      Zotero.debug("[LLM Assistant] Registered renderTextSelectionPopup listener");
+      Zotero.debug("[LLM Assistant] renderTextSelectionPopup listener registered");
     } catch (e) {
       Zotero.logError(`[LLM Assistant] registerEventListener failed: ${e.message}`);
     }
-  } else {
-    Zotero.logError("[LLM Assistant] Zotero.Reader.registerEventListener not available; reader popup will not be added");
   }
 
-  // Add menu items and UI to all existing main windows
-  try {
-    const mainWindows = Zotero.getMainWindows();
-    for (const win of mainWindows) {
-      await onMainWindowLoad(win);
-    }
-  } catch (e) {
-    Zotero.logError(`[LLM Assistant] Initial main-window load failed: ${e.message}`);
-  }
+  // ── Set up reader tab observer for auto-read ──
+  _setupReaderObserver();
 
-  // Observe new windows
-  windowObserver = {
-    observe: async function (subject, topic) {
-      if (topic === "domwindowopened") {
-        const win = subject;
-        if (win.document && win.document.documentURI?.includes("chrome://zotero")) {
-          try {
-            await onMainWindowLoad(win);
-          } catch (e) {
-            Zotero.logError(`[LLM Assistant] Window load failed: ${e.message}`);
-          }
-        }
-      }
-    },
-  };
-  try {
-    Services.ww.registerNotification(windowObserver);
-  } catch (e) {
-    Zotero.logError(`[LLM Assistant] registerNotification failed: ${e.message}`);
-  }
+  // ── Non-blocking LLM connection health check ──
+  _checkLLMConnection();
 }
 
-function shutdown({ id, version, resourceURI, rootURI: rURI }, reason) {
-  Zotero.debug(`[LLM Assistant] Shutting down (reason=${reason})`);
-
-  if (reason === APP_SHUTDOWN) return;
-
-  // Unregister preferences pane
-  if (Zotero.PreferencePanes && typeof Zotero.PreferencePanes.unregister === "function") {
-    try {
-      Zotero.PreferencePanes.unregister(_readerListenerPluginID);
-    } catch (e) {
-      Zotero.debug(`[LLM Assistant] PreferencePanes.unregister failed: ${e.message}`);
-    }
-  }
-
-  // Unregister window observer
-  if (windowObserver) {
-    try {
-      Services.ww.unregisterNotification(windowObserver);
-    } catch (e) {
-      Zotero.logError(`[LLM Assistant] unregisterNotification failed: ${e.message}`);
-    }
-    windowObserver = null;
-  }
-
-  // Note: reader popup listeners registered via Zotero.Reader.registerEventListener
-  // are removed automatically when the plugin is unloaded.
-
-  // Remove menu items from all windows
-  try {
-    const mainWindows = Zotero.getMainWindows();
-    for (const win of mainWindows) {
-      onMainWindowUnload(win);
-    }
-  } catch (e) {
-    Zotero.logError(`[LLM Assistant] Window unload failed: ${e.message}`);
-  }
-
-  // Clean up plugin state
-  if (typeof Zotero.LLMAssistant !== "undefined") {
-    try {
-      Zotero.LLMAssistant.destroy();
-    } catch (e) {
-      Zotero.logError(`[LLM Assistant] Destroy failed: ${e.message}`);
-    }
-    delete Zotero.LLMAssistant;
-  }
-}
-
-function uninstall(data, reason) {}
-
-/**
- * Called when the main Zotero window is loaded.
- * The main-window item context menu (#zotero-itemmenu) is a stable,
- * non-XUL-injected popup and still works in 8/9, so we keep the old
- * MutationObserver-based approach for it.
- */
-async function onMainWindowLoad(win) {
+async function onMainWindowLoad({ window: win }, reason) {
   if (!win || !win.document) return;
 
-  // Wait for document to be ready
+  // Wait for document to be fully loaded
   if (win.document.readyState !== "complete") {
     await new Promise((resolve) => {
       win.addEventListener("load", resolve, { once: true });
     });
   }
 
-  await addMainWindowMenuItems(win);
+  // Wait for Zotero to be fully ready
+  try {
+    await Promise.all([
+      Zotero.initializationPromise,
+      Zotero.unlockPromise,
+      Zotero.uiReadyPromise,
+    ]);
+  } catch { /* ignore */ }
 
+  // Add context menu items
+  _addMainWindowMenuItems(win);
+
+  // Initialize the plugin (singleton guard)
   if (typeof Zotero.LLMAssistant !== "undefined" && Zotero.LLMAssistant.init) {
     if (!Zotero.LLMAssistant._initialized) {
       Zotero.LLMAssistant._initialized = true;
@@ -192,23 +166,168 @@ async function onMainWindowLoad(win) {
   }
 }
 
-function onMainWindowUnload(win) {
+async function onMainWindowUnload({ window: win }, reason) {
   if (!win || !win.document) return;
-  removeMainWindowMenuItems(win);
+  _removeMainWindowMenuItems(win);
+}
+
+function shutdown({ id, version, resourceURI, rootURI: rURI }, reason) {
+  Zotero.debug(`[LLM Assistant] Shutting down (reason=${reason})`);
+
+  if (reason === APP_SHUTDOWN) return;
+
+  // Unregister preferences pane
+  if (_prefsPaneID && Zotero.PreferencePanes && typeof Zotero.PreferencePanes.unregister === "function") {
+    try { Zotero.PreferencePanes.unregister(_prefsPaneID); }
+    catch (e) { Zotero.debug(`[LLM Assistant] prefs unregister failed: ${e.message}`); }
+    _prefsPaneID = null;
+  }
+
+  // Disconnect reader tab observer
+  if (_readerTabObserver) {
+    try { _readerTabObserver.disconnect(); }
+    catch (e) { /* ignore */ }
+    _readerTabObserver = null;
+  }
+
+  // Remove menu items from all windows
+  try {
+    const mainWindows = Zotero.getMainWindows();
+    for (const win of mainWindows) {
+      _removeMainWindowMenuItems(win);
+    }
+  } catch (e) {
+    Zotero.logError(`[LLM Assistant] Window unload failed: ${e.message}`);
+  }
+
+  // Clean up plugin state
+  if (typeof Zotero.LLMAssistant !== "undefined") {
+    try { Zotero.LLMAssistant.destroy(); }
+    catch (e) { Zotero.logError(`[LLM Assistant] Destroy failed: ${e.message}`); }
+    delete Zotero.LLMAssistant;
+  }
+
+  // Flush locale caches
+  try {
+    Components.classes["@mozilla.org/intl/stringbundle;1"]
+      .getService(Components.interfaces.nsIStringBundleService)
+      .flushBundles();
+  } catch { /* ignore */ }
+
+  // Destruct chrome registration
+  if (chromeHandle) {
+    chromeHandle.destruct();
+    chromeHandle = null;
+  }
+}
+
+function uninstall(data, reason) {}
+
+// ── Private helpers ───────────────────────────────────────────────────
+
+/**
+ * Watch for new reader tabs so we can auto-summarize each PDF on first open.
+ */
+function _setupReaderObserver() {
+  const win = Zotero.getMainWindow();
+  if (!win || !win.document) return;
+
+  const tabBar = win.document.getElementById("zotero-tab-bar");
+  if (!tabBar) {
+    Zotero.debug("[LLM Assistant] tab bar not found; auto-read disabled");
+    return;
+  }
+
+  _readerTabObserver = new win.MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        const tabEl = node.classList?.contains("zotero-tab")
+          ? node
+          : node.querySelector?.(".zotero-tab");
+        if (!tabEl) continue;
+
+        const tabID = tabEl.getAttribute("data-tab-id") || tabEl.dataset?.tabId;
+        if (!tabID) continue;
+
+        try {
+          const reader = Zotero.Reader.getByTabID(tabID);
+          if (reader && Zotero.LLMAssistant?.autoReadPDF) {
+            Zotero.debug(`[LLM Assistant] New reader tab: tabID=${tabID}`);
+            // Use requestIdleCallback to avoid blocking during tab creation
+            const idleCb = win.requestIdleCallback || ((fn) => setTimeout(fn, 1000));
+            idleCb(() => Zotero.LLMAssistant.autoReadPDF(reader));
+          }
+        } catch (e) {
+          Zotero.debug(`[LLM Assistant] reader tab check failed: ${e.message}`);
+        }
+      }
+    }
+  });
+
+  _readerTabObserver.observe(tabBar, { childList: true, subtree: true });
+  Zotero.debug("[LLM Assistant] Reader tab observer installed");
+}
+
+/**
+ * Non-blocking health check: verify the LLM API is reachable.
+ */
+async function _checkLLMConnection() {
+  try {
+    await new Promise((r) => setTimeout(r, 3000));
+
+    if (!Zotero.LLMAssistant?.LLMClient) {
+      Zotero.debug("[LLM Assistant] Connection check: LLMClient not available");
+      return;
+    }
+
+    const apiKey = Zotero.Prefs.get(PREF_PREFIX + "api-key", true);
+    if (!apiKey) {
+      Zotero.debug("[LLM Assistant] No API key configured, skipping connection check");
+      return;
+    }
+
+    Zotero.debug("[LLM Assistant] Checking LLM API connection...");
+    const result = await Zotero.LLMAssistant.LLMClient.testConnection();
+    if (result.success) {
+      Zotero.debug(`[LLM Assistant] LLM API OK: ${result.message}`);
+    } else {
+      Zotero.logError(`[LLM Assistant] LLM API FAILED: ${result.message}`);
+    }
+  } catch (e) {
+    Zotero.debug(`[LLM Assistant] Connection check error: ${e.message}`);
+  }
 }
 
 /**
  * Add library-item right-click menu items to the main Zotero window.
- * Targets the stable #zotero-itemmenu popup, which is part of the
- * main window's XHTML and still injected the same way in 7/8/9.
  */
-async function addMainWindowMenuItems(win) {
-  if (win._llmAssistantMenuObserver) return;
+function _addMainWindowMenuItems(win) {
+  if (!win || !win.document || win._llmAssistantMenuObserver) return;
 
   const inject = () => {
     const popup = win.document.getElementById("zotero-itemmenu");
     if (popup && !popup._llmAssistantInjected) {
-      injectItemMenuItems(popup, win);
+      popup._llmAssistantInjected = true;
+      const doc = win.document;
+
+      const sep = doc.createXULElement("menuseparator");
+      popup.appendChild(sep);
+
+      const items = [
+        { id: "zotero-llm-summarize",         label: "总结条目",     cmd: "Zotero.LLMAssistant.summarizeSelected()" },
+        { id: "zotero-llm-translate",          label: "翻译选中文本", cmd: "Zotero.LLMAssistant.translateSelection()" },
+        { id: "zotero-llm-translate-annotate", label: "翻译并标注",   cmd: "Zotero.LLMAssistant.translateAndAnnotate()" },
+        { id: "zotero-llm-explain",            label: "解释选中文本", cmd: "Zotero.LLMAssistant.explainSelection()" },
+      ];
+
+      for (const def of items) {
+        const item = doc.createXULElement("menuitem");
+        item.setAttribute("id", def.id);
+        item.setAttribute("label", def.label);
+        item.setAttribute("oncommand", def.cmd);
+        popup.appendChild(item);
+      }
     }
   };
 
@@ -219,95 +338,20 @@ async function addMainWindowMenuItems(win) {
   win._llmAssistantMenuObserver = observer;
 }
 
-function removeMainWindowMenuItems(win) {
+function _removeMainWindowMenuItems(win) {
   if (win._llmAssistantMenuObserver) {
-    try { win._llmAssistantMenuObserver.disconnect(); } catch (e) { /* ignore */ }
+    try { win._llmAssistantMenuObserver.disconnect(); }
+    catch (e) { /* ignore */ }
     delete win._llmAssistantMenuObserver;
   }
 }
 
-function injectItemMenuItems(popup, win) {
-  popup._llmAssistantInjected = true;
-  const doc = win.document;
-
-  const sep = doc.createXULElement("menuseparator");
-  popup.appendChild(sep);
-
-  const items = [
-    { id: "zotero-llm-summarize",        label: "总结条目",      cmd: "Zotero.LLMAssistant.summarizeSelected()" },
-    { id: "zotero-llm-translate",         label: "翻译选中文本",  cmd: "Zotero.LLMAssistant.translateSelection()" },
-    { id: "zotero-llm-translate-annotate",label: "翻译并标注",    cmd: "Zotero.LLMAssistant.translateAndAnnotate()" },
-    { id: "zotero-llm-explain",          label: "解释选中文本",  cmd: "Zotero.LLMAssistant.explainSelection()" },
-  ];
-
-  for (const def of items) {
-    const item = doc.createXULElement("menuitem");
-    item.setAttribute("id", def.id);
-    item.setAttribute("label", def.label);
-    item.setAttribute("oncommand", def.cmd);
-    popup.appendChild(item);
-  }
-}
-
 /**
- * Reader-internal popup: invoked by Zotero.Reader whenever a text
- * selection popup is about to be rendered inside a PDF/EPUB reader.
- * We append a "翻译并标注" button to that popup.
- *
- * The event payload (Zotero 7+):
- *   {
- *     reader,                       // Zotero.Reader instance
- *     doc,                          // document inside the reader iframe
- *     params: { annotation: { text, ... } },
- *     append,                       // (htmlElement) => void  — adds the element to the popup
- *   }
+ * Reader popup: invoked by Zotero.Reader when text is selected in a PDF.
+ * Delegates to overlay.js which handles caching + auto-translation.
  */
 function onRenderTextSelectionPopup(event) {
-  const { doc, params, append } = event;
-  if (!doc || !append) return;
-
-  const selectedText = (params && params.annotation && params.annotation.text) || "";
-  // Stash the current selection so translateAndAnnotate can read it
-  // even if the old "find selection from main window" path no longer
-  // works on Zotero 9's reader.
-  try {
-    if (Zotero.LLMAssistant) {
-      Zotero.LLMAssistant._lastSelection = {
-        text: selectedText,
-        ts: Date.now(),
-      };
-    }
-  } catch (e) {
-    Zotero.logError(`[LLM Assistant] stash selection failed: ${e.message}`);
-  }
-
-  // Build a button
-  let btn;
-  try {
-    btn = doc.createElement("button");
-  } catch (e) {
-    Zotero.logError(`[LLM Assistant] createElement(button) failed: ${e.message}`);
-    return;
-  }
-  btn.className = "zotero-llm-assistant-selection-btn";
-  btn.textContent = "🌐 翻译并标注";
-  btn.setAttribute("data-llm-action", "translateAndAnnotate");
-  btn.style.cssText = "margin: 0 4px; padding: 2px 8px; cursor: pointer;";
-  btn.addEventListener("click", (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    try {
-      if (Zotero.LLMAssistant && Zotero.LLMAssistant.translateAndAnnotate) {
-        Zotero.LLMAssistant.translateAndAnnotate();
-      }
-    } catch (e) {
-      Zotero.logError(`[LLM Assistant] translateAndAnnotate click failed: ${e.message}`);
-    }
-  });
-
-  try {
-    append(btn);
-  } catch (e) {
-    Zotero.logError(`[LLM Assistant] append(reader btn) failed: ${e.message}`);
+  if (Zotero.LLMAssistant?.onTextSelected) {
+    Zotero.LLMAssistant.onTextSelected(event);
   }
 }

@@ -38,7 +38,7 @@ Zotero.LLMAssistant.PromptBuilder = {
       parts.push(`Existing Tags: ${itemData.tags.join(", ")}`);
     }
     if (itemData.fullText) {
-      const truncatedText = itemData.fullText.substring(0, 8000);
+      const truncatedText = this._truncateAtSentence(itemData.fullText, 8000);
       parts.push(`\n--- Paper Content (truncated) ---\n${truncatedText}`);
     }
 
@@ -71,7 +71,7 @@ Zotero.LLMAssistant.PromptBuilder = {
     if (itemData.title) parts.push(`Title: ${itemData.title}`);
     if (itemData.abstractNote) parts.push(`Abstract: ${itemData.abstractNote}`);
     if (itemData.fullText) {
-      const truncatedText = itemData.fullText.substring(0, 8000);
+      const truncatedText = this._truncateAtSentence(itemData.fullText, 8000);
       parts.push(`\n--- Paper Content (truncated) ---\n${truncatedText}`);
     }
     parts.push(`\n--- Question ---\n${question}`);
@@ -160,50 +160,58 @@ Zotero.LLMAssistant.PromptBuilder = {
   buildContextAwareTranslatePrompt({ selected, sentence, surrounding, fullText }) {
     const lang = this._getLanguage();
 
-    // Truncate full text to keep within token budget
-    const MAX_FULL = 6000;
+    // Keep full text very short to minimize latency
+    const MAX_FULL = 1500;
     const truncatedFull = fullText
-      ? fullText.length > MAX_FULL
-        ? "..." + fullText.substring(fullText.length - MAX_FULL)
-        : fullText
+      ? this._truncateAtSentence(fullText, MAX_FULL)
       : "";
 
     return (
-      `You are an expert bilingual translator specialized in academic papers. ` +
-      `Your task is to determine the most appropriate meaning of a selected term ` +
-      `based on its context within the paper.\n\n` +
-      `Steps:\n` +
-      `1. Identify whether the selected text is a single word or a multi-word phrase.\n` +
-      `2. Consider the sentence where it appears, the surrounding paragraphs, and ` +
-      `the overall topic of the paper.\n` +
-      `3. Choose the meaning that BEST fits THIS specific context (not a generic ` +
-      `dictionary definition). If it is a phrase, translate it as a phrase.\n` +
-      `4. Provide a concise Chinese translation.\n\n` +
-      `Return ONLY a JSON object with this exact structure (no markdown fences, no extra text):\n` +
-      `{\n` +
-      `  "type": "word" or "phrase",\n` +
-      `  "original": "${this._escapeQuotes(selected)}",\n` +
-      `  "phonetic": "phonetic symbol (only for single words, empty if phrase or unknown)",\n` +
-      `  "partOfSpeech": "词性缩写 n./v./adj./adv./phr. (use 'phr.' for phrases)",\n` +
-      `  "translation": "the most context-appropriate Chinese meaning",\n` +
-      `  "reasoning": "1 sentence explaining why this meaning fits the context",\n` +
-      `  "examples": ["原文例句 + 中文翻译", "..."]\n` +
-      `}\n\n` +
-      `--- Selected Term ---\n${selected}\n\n` +
-      `--- Sentence Containing Selection ---\n${sentence}\n\n` +
-      (surrounding
-        ? `--- Surrounding Context ---\n${surrounding}\n\n`
-        : "") +
-      (truncatedFull
-        ? `--- Full Paper (most recent ${truncatedFull.length} chars) ---\n${truncatedFull}\n`
-        : "")
+      `Expert bilingual translator for academic papers. ` +
+      `Determine the context-appropriate meaning of the selected term and translate to ${lang}. ` +
+      `Return ONLY JSON (no markdown):\n` +
+      `{"type":"word|phrase","original":"${this._escapeQuotes(selected)}",` +
+      `"phonetic":"IPA or empty","partOfSpeech":"n./v./adj./adv./phr.",` +
+      `"translation":"concise Chinese meaning","reasoning":"1 sentence why",` +
+      `"examples":["原文例句 + 中文翻译"]}\n\n` +
+      `Selected: ${selected}\n` +
+      `Sentence: ${sentence}\n` +
+      (surrounding ? `Context: ${surrounding}\n` : "") +
+      (truncatedFull ? `Paper excerpt: ${truncatedFull}\n` : "")
     );
   },
 
   /**
-   * Escape a string for embedding in a JSON prompt template
+   * Escape a string for embedding in a JSON prompt template.
+   * Handles quotes, backslashes, newlines, tabs, and other control characters.
    */
   _escapeQuotes(s) {
-    return (s || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return (s || "")
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, "\\n")
+      .replace(/\r/g, "\\r")
+      .replace(/\t/g, "\\t")
+      .replace(/[\x00-\x1f]/g, ""); // strip remaining control chars
+  },
+
+  /**
+   * Truncate text at a sentence boundary near the target length.
+   * Avoids cutting mid-word or mid-sentence.
+   */
+  _truncateAtSentence(text, maxLen) {
+    if (!text || text.length <= maxLen) return text || "";
+    // Try to find the last sentence boundary before maxLen
+    const truncated = text.substring(0, maxLen);
+    const lastBreak = truncated.search(/[^.!?。！？\n][.!?。！？\n][^.!?。！？\n]*$/);
+    if (lastBreak > maxLen * 0.5) {
+      return truncated.substring(0, lastBreak + 2);
+    }
+    // Fall back to last space
+    const lastSpace = truncated.lastIndexOf(" ");
+    if (lastSpace > maxLen * 0.5) {
+      return truncated.substring(0, lastSpace) + "...";
+    }
+    return truncated + "...";
   },
 };

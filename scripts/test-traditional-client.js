@@ -13,7 +13,7 @@ const vm = require("vm");
 const assert = require("assert");
 
 const SRC = fs.readFileSync(
-    path.join(__dirname, "..", "addon", "content", "traditionalClient.js"),
+    path.join(__dirname, "..", "addon", "traditionalClient.js"),
     "utf8"
 );
 
@@ -92,6 +92,8 @@ function makeMockEnv({ prefValues = {}, fetchResponse, fetchError, nowMs = 15674
             constructor(...args) { super(...args); }
             static now() { return nowMs; }
         },
+        setTimeout,
+        setImmediate,
         console
     };
     return { env, calls };

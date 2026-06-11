@@ -43,8 +43,8 @@ function copyRecursive(src, dest, exclude = []) {
 
 function copyBuildAssets() {
   // If the addon ships real icons, copyAddonFiles() already copied them
-  // into BUILD_DIR/content/icons/, so there is nothing to do.
-  const realIcons = path.join(ADDON_DIR, "content", "icons");
+  // into BUILD_DIR/icons/, so there is nothing to do.
+  const realIcons = path.join(ADDON_DIR, "icons");
   if (fs.existsSync(realIcons)) {
     const files = fs.readdirSync(realIcons).filter((f) => f.startsWith("icon@") && f.endsWith(".png"));
     if (files.length > 0) {
@@ -55,14 +55,14 @@ function copyBuildAssets() {
 
   // Fallback: write a 1x1 transparent PNG so the .xpi still has an icons/
   // entry — Zotero's plugin manager will at least not complain on install.
-  console.log("  no real icons in addon/content/icons/, writing 1x1 placeholder");
-  ensureDir(path.join(BUILD_DIR, "content", "icons"));
+  console.log("  no real icons in addon/icons/, writing 1x1 placeholder");
+  ensureDir(path.join(BUILD_DIR, "icons"));
   const placeholderPng = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
     "base64"
   );
-  fs.writeFileSync(path.join(BUILD_DIR, "content", "icons", "icon@48.png"), placeholderPng);
-  fs.writeFileSync(path.join(BUILD_DIR, "content", "icons", "icon@96.png"), placeholderPng);
+  fs.writeFileSync(path.join(BUILD_DIR, "icons", "icon@48.png"), placeholderPng);
+  fs.writeFileSync(path.join(BUILD_DIR, "icons", "icon@96.png"), placeholderPng);
 }
 
 function copyAddonFiles() {

@@ -17,7 +17,7 @@ const vm = require("vm");
 const assert = require("assert");
 
 const SRC = fs.readFileSync(
-    path.join(__dirname, "..", "addon", "content", "uiManager.js"), "utf8"
+    path.join(__dirname, "..", "addon", "uiManager.js"), "utf8"
 );
 
 // Extract just sourceDisplayName and a `composeTraditionalRow` helper we'll

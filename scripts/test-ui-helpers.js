@@ -18,7 +18,7 @@ vm.createContext(sandbox);
 
 // Load uiManager.js
 const code = fs.readFileSync(
-  path.join(__dirname, "..", "addon", "content", "uiManager.js"),
+  path.join(__dirname, "..", "addon", "uiManager.js"),
   "utf-8"
 );
 vm.runInContext(code, sandbox);

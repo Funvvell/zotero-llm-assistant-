@@ -28,7 +28,7 @@ var TraditionalClient = {
     _registerDefaults() {
         if (typeof Zotero === "undefined" || !Zotero.Prefs) return;
         const defaults = {
-            "pref-traditional-engine": "baidu",
+            "pref-traditional-engine": "mymemory",
             "pref-baidu-appid":  "",
             "pref-baidu-key":    "",
             "pref-youdao-appkey":    "",
@@ -39,7 +39,8 @@ var TraditionalClient = {
             "pref-azure-to":     "zh-Hans",
             "pref-google-key":   "",
             "pref-google-from":  "",
-            "pref-google-to":    "zh-CN"
+            "pref-google-to":    "zh-CN",
+            "language":          "Chinese"
         };
         for (const k of Object.keys(defaults)) {
             try { Zotero.Prefs.registerDefault(this.PREF_PREFIX + k, defaults[k]); }
@@ -64,16 +65,86 @@ var TraditionalClient = {
         const engine = this._getPref("pref-traditional-engine") || "baidu";
 
         switch (engine) {
-            case "baidu":  return this._baidu(text, options);
-            case "youdao": return this._youdao(text, options);
-            case "azure":  return this._azure(text, options);
-            case "google": return this._google(text, options);
+            case "baidu":    return this._baidu(text, options);
+            case "youdao":   return this._youdao(text, options);
+            case "azure":    return this._azure(text, options);
+            case "google":   return this._google(text, options);
+            case "mymemory": return this._mymemory(text, options);
             default:
                 return {
                     source: engine,
                     text: null,
                     error: `unknown engine: ${engine}`
                 };
+        }
+    },
+
+    /**
+     * Test the connection/configuration of the currently selected engine.
+     * Performs a real translation of "hello" to verify everything works.
+     *
+     * @returns {Promise<{success:boolean, message:string}>}
+     */
+    async testConnection() {
+        const engine = this._getPref("pref-traditional-engine") || "baidu";
+
+        // 1. Check credentials before making any network request
+        switch (engine) {
+            case "baidu": {
+                const appid = this._getPref("pref-baidu-appid");
+                const key   = this._getPref("pref-baidu-key");
+                if (!appid || !key) {
+                    return { success: false, message: "百度翻译: 未配置 App ID 或密钥" };
+                }
+                break;
+            }
+            case "youdao": {
+                const appKey    = this._getPref("pref-youdao-appkey");
+                const appSecret = this._getPref("pref-youdao-appsecret");
+                if (!appKey || !appSecret) {
+                    return { success: false, message: "有道翻译: 未配置 AppKey 或 AppSecret" };
+                }
+                break;
+            }
+            case "azure": {
+                const key = this._getPref("pref-azure-key");
+                if (!key) {
+                    return { success: false, message: "微软翻译: 未配置 Subscription Key" };
+                }
+                break;
+            }
+            case "google": {
+                const key = this._getPref("pref-google-key");
+                if (!key) {
+                    return { success: false, message: "Google 翻译: 未配置 API Key" };
+                }
+                break;
+            }
+            case "mymemory":
+                // No credentials needed — proceed to test
+                break;
+            default:
+                return { success: false, message: `未知引擎: ${engine}` };
+        }
+
+        // 2. Attempt a real translation with a short test string
+        const engineNames = {
+            mymemory: "MyMemory",
+            baidu:    "百度翻译",
+            youdao:   "有道翻译",
+            azure:    "微软翻译",
+            google:   "Google 翻译",
+        };
+        const name = engineNames[engine] || engine;
+
+        try {
+            const result = await this.translate("hello", { from: "en", to: "zh" });
+            if (result.text) {
+                return { success: true, message: `${name} 连接成功！翻译示例: hello → ${result.text}` };
+            }
+            return { success: false, message: `${name}: ${result.error || "返回结果为空"}` };
+        } catch (e) {
+            return { success: false, message: `${name} 连接失败: ${e.message}` };
         }
     },
 
@@ -90,21 +161,46 @@ var TraditionalClient = {
     },
 
     /**
-     * Minimal XMLHttpRequest wrapper with a hard timeout. Resolves with the
-     * response text on 2xx; rejects with an Error otherwise. The caller is
-     * responsible for parsing the response body.
+     * Map a language preference name to a short code usable in API params.
+     * Falls back to "zh" when the name is not recognised.
+     * @private
+     */
+    _langCode(langName) {
+        if (!langName) return "zh";
+        const map = {
+            "Chinese": "zh", "Japanese": "ja", "Korean": "ko",
+            "French": "fr", "German": "de", "Spanish": "es",
+            "Portuguese": "pt", "Russian": "ru", "Arabic": "ar",
+            "Italian": "it", "Dutch": "nl", "Polish": "pl",
+        };
+        return map[langName] || "zh";
+    },
+
+    /**
+     * Minimal XMLHttpRequest wrapper with a hard timeout and retry for
+     * transient failures (network errors, timeouts, 5xx).
+     * Resolves with the response text on 2xx; rejects with an Error otherwise.
+     *
+     * Improvements over the original:
+     *   - Retries up to 2 times on network/timeout/5xx errors
+     *   - Does NOT set Content-Type on GET requests (was always setting it)
      * @private
      */
     _fetch(url, options = {}) {
         const timeoutMs = options.timeoutMs || this.DEFAULT_TIMEOUT_MS;
-        return new Promise((resolve, reject) => {
+        const maxRetries = options.retries !== undefined ? options.retries : 2;
+        const method = options.method || "GET";
+        const isGet = method.toUpperCase() === "GET";
+
+        const doRequest = (attempt) => new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
-            const method = options.method || "GET";
             xhr.open(method, url, true);
             xhr.timeout = timeoutMs;
 
             if (options.headers) {
                 for (const k of Object.keys(options.headers)) {
+                    // Skip Content-Type on GET requests (meaningless and can cause CORS issues)
+                    if (isGet && k.toLowerCase() === "content-type") continue;
                     xhr.setRequestHeader(k, options.headers[k]);
                 }
             }
@@ -112,12 +208,27 @@ var TraditionalClient = {
             xhr.onload = () => {
                 if (xhr.status >= 200 && xhr.status < 300) {
                     resolve(xhr.responseText);
+                } else if (xhr.status >= 500 && attempt < maxRetries) {
+                    // Server error — retry with backoff
+                    setTimeout(() => doRequest(attempt + 1).then(resolve, reject), 500 * (attempt + 1));
                 } else {
                     reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText || ""}`));
                 }
             };
-            xhr.onerror = () => reject(new Error("network error"));
-            xhr.ontimeout = () => reject(new Error(`timeout after ${timeoutMs}ms`));
+            xhr.onerror = () => {
+                if (attempt < maxRetries) {
+                    setTimeout(() => doRequest(attempt + 1).then(resolve, reject), 500 * (attempt + 1));
+                } else {
+                    reject(new Error("network error"));
+                }
+            };
+            xhr.ontimeout = () => {
+                if (attempt < maxRetries) {
+                    setTimeout(() => doRequest(attempt + 1).then(resolve, reject), 500 * (attempt + 1));
+                } else {
+                    reject(new Error(`timeout after ${timeoutMs}ms`));
+                }
+            };
 
             try {
                 xhr.send(options.body || null);
@@ -125,6 +236,8 @@ var TraditionalClient = {
                 reject(e);
             }
         });
+
+        return doRequest(0);
     },
 
     /**
@@ -153,25 +266,33 @@ var TraditionalClient = {
     /**
      * Compute a SHA-256 hex digest. Uses Node's crypto when available (tests),
      * then Zotero's bundled helper, otherwise the Web Crypto SubtleCrypto API
-     * when present, then the pure-JS fallback.
+     * when present.
+     *
+     * IMPORTANT: Unlike the previous version, this no longer falls back to MD5
+     * when SHA-256 is unavailable. MD5 ≠ SHA-256 and would cause silent
+     * authentication failures (e.g. Youdao). Instead, it throws a clear error.
      * @private
      */
     async _sha256(input) {
+        // 1. Node.js (test environment)
         if (typeof require === "function") {
             try {
                 const crypto = require("crypto");
                 return crypto.createHash("sha256").update(String(input), "utf8").digest("hex");
             } catch (e) { /* fall through */ }
         }
+        // 2. Zotero production environment
         if (typeof Zotero !== "undefined" && Zotero.Utilities &&
             Zotero.Utilities.Internal && typeof Zotero.Utilities.Internal.sha256 === "function") {
             return Zotero.Utilities.Internal.sha256(input);
         }
+        // 3. Web Crypto API (modern browsers / Zotero 9)
         if (typeof crypto !== "undefined" && crypto.subtle && typeof crypto.subtle.digest === "function") {
             const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(input)));
             return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
         }
-        return this._md5Pure(input); // last-resort; throws in unsupported envs
+        // 4. No SHA-256 available — fail clearly instead of silently using MD5
+        throw new Error("SHA-256 not available in this environment (required for Youdao signature)");
     },
 
     /**
@@ -401,6 +522,65 @@ var TraditionalClient = {
             .replace(/&gt;/g, ">");
         const text2 = translations.map(t => decode(t.translatedText)).join("\n");
         return { source: "google", text: text2, error: null };
+    },
+
+    /** @private MyMemory Translation API — FREE, no API key required.
+     *  Docs: https://mymemory.translated.net/doc/spec.php
+     *  Endpoint: GET https://api.mymemory.translated.net/get?q=<text>&langpair=<from>|<to>
+     *  Rate limit: 5000 chars/day anonymous; more with a free email registration.
+     *  This is the default engine so the plugin works out-of-the-box.
+     */
+    async _mymemory(text, options) {
+        const from = options.from || "en";
+        const langPref = this._getPref("language") || "Chinese";
+        const to = options.to || this._langCode(langPref);
+        const q = String(text).substring(0, 500); // MyMemory caps at 500 chars per request
+
+        const params = new URLSearchParams({
+            q,
+            langpair: `${from}|${to}`,
+        });
+        const url = `https://api.mymemory.translated.net/get?${params.toString()}`;
+
+        let raw;
+        try {
+            raw = await this._fetch(url, { method: "GET", timeoutMs: 8000 });
+        } catch (e) {
+            return { source: "mymemory", text: null, error: `mymemory network: ${e.message}` };
+        }
+
+        let body;
+        try { body = JSON.parse(raw); } catch (e) {
+            return { source: "mymemory", text: null, error: "mymemory: invalid JSON" };
+        }
+
+        if (body.responseStatus && body.responseStatus !== 200 && body.responseStatus !== "200") {
+            return {
+                source: "mymemory",
+                text: null,
+                error: `mymemory ${body.responseStatus}: ${body.responseDetails || "unknown error"}`
+            };
+        }
+
+        const translated = body.responseData && body.responseData.translatedText;
+        if (!translated) {
+            return { source: "mymemory", text: null, error: "mymemory: empty result" };
+        }
+
+        // MyMemory sometimes returns the original text in ALL CAPS when it can't translate;
+        // in that case fall back to matches if available.
+        if (translated.toUpperCase() === q.toUpperCase() && q.length > 3) {
+            // Check matches for a better translation
+            const matches = body.matches || [];
+            const goodMatch = matches.find(m =>
+                m.translation && m.translation.toUpperCase() !== q.toUpperCase() && m.quality
+            );
+            if (goodMatch) {
+                return { source: "mymemory", text: goodMatch.translation, error: null };
+            }
+        }
+
+        return { source: "mymemory", text: translated, error: null };
     }
 };
 

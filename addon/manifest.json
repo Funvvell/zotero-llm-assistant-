@@ -5,8 +5,8 @@
   "description": "Integrate Large Language Models into Zotero for paper summarization, translation, and Q&A. v1.1 adds parallel traditional-translation engines (Baidu / Youdao / Azure / Google) alongside the LLM.",
   "author": "LLM Assistant Contributors",
   "icons": {
-    "48": "content/icons/icon@48.png",
-    "96": "content/icons/icon@96.png"
+    "48": "chrome/content/icons/icon@48.png",
+    "96": "chrome/content/icons/icon@96.png"
   },
   "applications": {
     "zotero": {
