@@ -678,9 +678,11 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
         return;
       }
 
-      // ── Generate sort index (pure numeric string, Zotero format) ──
+      // ── Generate sort index (Zotero PDF format: DDDDD|DDDDDD|DDDDD) ──
       const pi = position.pageIndex || 0;
-      const sortIndex = String(pi).padStart(5, "0") + String(Math.floor(Math.random() * 99999)).padStart(5, "0") + String(Math.floor(Math.random() * 99999)).padStart(5, "0");
+      const sortIndex = String(pi).padStart(5, "0").slice(0, 5)
+        + "|" + String(Math.floor(Math.random() * 999999)).padStart(6, "0").slice(0, 6)
+        + "|" + String(Math.floor(Math.random() * 99999)).padStart(5, "0").slice(0, 5);
 
       // ── Create native Zotero text annotation ──
       // Generate a unique key (Zotero uses 8-char alphanumeric keys)
