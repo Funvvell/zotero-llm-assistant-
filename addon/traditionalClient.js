@@ -177,67 +177,70 @@ var TraditionalClient = {
     },
 
     /**
-     * Minimal XMLHttpRequest wrapper with a hard timeout and retry for
-     * transient failures (network errors, timeouts, 5xx).
-     * Resolves with the response text on 2xx; rejects with an Error otherwise.
-     *
-     * Improvements over the original:
-     *   - Retries up to 2 times on network/timeout/5xx errors
-     *   - Does NOT set Content-Type on GET requests (was always setting it)
+     * HTTP request using Zotero's native HTTP module (faster than raw XMLHttpRequest).
+     * Falls back to XMLHttpRequest if Zotero.HTTP is not available.
      * @private
      */
-    _fetch(url, options = {}) {
+    async _fetch(url, options = {}) {
         const timeoutMs = options.timeoutMs || this.DEFAULT_TIMEOUT_MS;
-        const maxRetries = options.retries !== undefined ? options.retries : 2;
         const method = options.method || "GET";
-        const isGet = method.toUpperCase() === "GET";
 
-        const doRequest = (attempt) => new Promise((resolve, reject) => {
+        // Prefer Zotero.HTTP.request (native Mozilla networking, connection pooling)
+        if (typeof Zotero !== "undefined" && Zotero.HTTP && typeof Zotero.HTTP.request === "function") {
+            try {
+                const xhrOpts = {
+                    responseType: "text",
+                    headers: {},
+                };
+                if (options.body) {
+                    xhrOpts.body = options.body;
+                }
+                if (options.headers) {
+                    const isGet = method.toUpperCase() === "GET";
+                    for (const k of Object.keys(options.headers)) {
+                        if (isGet && k.toLowerCase() === "content-type") continue;
+                        xhrOpts.headers[k] = options.headers[k];
+                    }
+                }
+                // Zotero.HTTP.request uses timeout via XMLHttpRequest internally
+                const xhr = await Zotero.HTTP.request(method, url, xhrOpts);
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    return xhr.response || xhr.responseText || "";
+                }
+                throw new Error(`HTTP ${xhr.status}: ${xhr.responseText || ""}`);
+            } catch (e) {
+                // If Zotero.HTTP fails, fall through to XMLHttpRequest
+                if (e.message && e.message.includes("HTTP")) throw e;
+            }
+        }
+
+        // Fallback: raw XMLHttpRequest
+        return new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             xhr.open(method, url, true);
             xhr.timeout = timeoutMs;
-
             if (options.headers) {
+                const isGet = method.toUpperCase() === "GET";
                 for (const k of Object.keys(options.headers)) {
-                    // Skip Content-Type on GET requests (meaningless and can cause CORS issues)
                     if (isGet && k.toLowerCase() === "content-type") continue;
                     xhr.setRequestHeader(k, options.headers[k]);
                 }
             }
-
             xhr.onload = () => {
                 if (xhr.status >= 200 && xhr.status < 300) {
                     resolve(xhr.responseText);
-                } else if (xhr.status >= 500 && attempt < maxRetries) {
-                    // Server error — retry with backoff
-                    setTimeout(() => doRequest(attempt + 1).then(resolve, reject), 500 * (attempt + 1));
                 } else {
                     reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText || ""}`));
                 }
             };
-            xhr.onerror = () => {
-                if (attempt < maxRetries) {
-                    setTimeout(() => doRequest(attempt + 1).then(resolve, reject), 500 * (attempt + 1));
-                } else {
-                    reject(new Error("network error"));
-                }
-            };
-            xhr.ontimeout = () => {
-                if (attempt < maxRetries) {
-                    setTimeout(() => doRequest(attempt + 1).then(resolve, reject), 500 * (attempt + 1));
-                } else {
-                    reject(new Error(`timeout after ${timeoutMs}ms`));
-                }
-            };
-
+            xhr.onerror = () => reject(new Error("network error"));
+            xhr.ontimeout = () => reject(new Error(`timeout after ${timeoutMs}ms`));
             try {
                 xhr.send(options.body || null);
             } catch (e) {
                 reject(e);
             }
         });
-
-        return doRequest(0);
     },
 
     /**

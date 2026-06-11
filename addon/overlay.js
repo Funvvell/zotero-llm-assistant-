@@ -326,10 +326,21 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
     _lastSelectionAnnotation = params?.annotation || null;
     _lastReader = reader || null;
 
-    // Capture context IMMEDIATELY while selection still exists in the DOM
-    // Pass the event's doc AND the known selected text (from params.annotation.text)
+    // Capture context: try DOM first (sync), then async getFullText() as backup
     _lastContext = _getSelectionContext(doc, selectedText);
-    Zotero.debug(`[LLM Assistant] Context captured: sentence="${_lastContext.sentence.substring(0, 100)}", surrounding=${!!_lastContext.surrounding}`);
+    Zotero.debug(`[LLM Assistant] DOM context: sentence="${_lastContext.sentence.substring(0, 80)}", surrounding=${!!_lastContext.surrounding}`);
+
+    // If DOM context failed, try getFullText() async (Zotero's indexed full-text)
+    if (!_lastContext.sentence && reader && reader.itemID) {
+      _fetchFullTextContext(reader.itemID, selectedText).then(ctx => {
+        if (ctx.sentence) {
+          _lastContext = ctx;
+          Zotero.debug(`[LLM Assistant] FullText context: sentence="${ctx.sentence.substring(0, 80)}"`);
+        }
+      }).catch(e => {
+        Zotero.debug(`[LLM Assistant] FullText context failed: ${e.message}`);
+      });
+    }
 
     if (!selectedText.trim()) return;
 
@@ -1005,6 +1016,72 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
       Zotero.debug(`[LLM Assistant] context error: ${e.message}`);
     }
     return { sentence, surrounding };
+  }
+
+  /**
+   * Async fallback: use Zotero's indexed full text (getFullText) to extract context.
+   * This bypasses the DOM entirely and works even when .textLayer queries fail.
+   * @param {number} itemID - The PDF attachment item ID
+   * @param {string} selectedText - The selected text
+   * @returns {Promise<{sentence:string, surrounding:string}>}
+   */
+  async function _fetchFullTextContext(itemID, selectedText) {
+    const result = { sentence: "", surrounding: "" };
+    if (!selectedText || !itemID) return result;
+    try {
+      const attItem = Zotero.Items.get(itemID);
+      if (!attItem) return result;
+      let fullText = "";
+      if (typeof attItem.getFullText === "function") {
+        const ft = await attItem.getFullText();
+        fullText = typeof ft === "string" ? ft : (ft?.content || "");
+      }
+      if (!fullText && Zotero.PDFWorker && typeof Zotero.PDFWorker.getFullText === "function") {
+        fullText = await Zotero.PDFWorker.getFullText(itemID, true) || "";
+      }
+      if (!fullText) {
+        Zotero.debug("[LLM Assistant] FullText: no full text available");
+        return result;
+      }
+      Zotero.debug(`[LLM Assistant] FullText: length=${fullText.length}`);
+      // Normalize and search
+      const normalized = fullText.replace(/\s+/g, " ").trim();
+      const normalizedSelected = selectedText.replace(/\s+/g, " ").trim();
+      const idx = normalized.toLowerCase().indexOf(normalizedSelected.toLowerCase());
+      Zotero.debug(`[LLM Assistant] FullText: indexOf=${idx}`);
+      if (idx < 0) {
+        // Try first few words
+        const words = normalizedSelected.split(/\s+/);
+        const short = words.slice(0, Math.min(3, words.length)).join(" ");
+        const idx2 = normalized.toLowerCase().indexOf(short.toLowerCase());
+        if (idx2 >= 0) {
+          const cs = Math.max(0, idx2 - 400);
+          const ce = Math.min(normalized.length, idx2 + 600);
+          result.sentence = normalized.substring(cs, ce);
+          result.surrounding = result.sentence;
+          return result;
+        }
+        return result;
+      }
+      // Extract sentence
+      const SENTENCE_END = /[.!?。！？]\s/g;
+      const before = normalized.substring(0, idx);
+      const after = normalized.substring(idx + normalizedSelected.length);
+      let sentenceStart = 0, m;
+      const bRe = new RegExp(SENTENCE_END, "g");
+      while ((m = bRe.exec(before)) !== null) sentenceStart = m.index + m[0].length;
+      const aRe = new RegExp(SENTENCE_END, "g");
+      const firstAfter = aRe.exec(after);
+      let sentenceEnd = after.length;
+      if (firstAfter) sentenceEnd = firstAfter.index + firstAfter[0].length;
+      result.sentence = (before.substring(sentenceStart) + normalizedSelected + after.substring(0, sentenceEnd)).trim();
+      const cs = Math.max(0, idx - 400), ce = Math.min(normalized.length, idx + normalizedSelected.length + 400);
+      result.surrounding = normalized.substring(cs, ce).trim();
+      Zotero.debug(`[LLM Assistant] FullText: sentence="${result.sentence.substring(0, 100)}"`);
+    } catch (e) {
+      Zotero.debug(`[LLM Assistant] FullText error: ${e.message}`);
+    }
+    return result;
   }
 
   function _getReaderSelection() { return _getReaderSelectionWithRect().text; }
