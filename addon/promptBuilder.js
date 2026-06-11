@@ -168,12 +168,12 @@ Zotero.LLMAssistant.PromptBuilder = {
 
     return (
       `Expert bilingual translator for academic papers. ` +
-      `Determine the context-appropriate meaning of the selected term and translate to ${lang}. ` +
+      `Based on the surrounding context, determine the most accurate meaning of the selected text and translate to ${lang}. ` +
+      `The translation MUST reflect how the term is used in this specific sentence and paper context. ` +
       `Return ONLY JSON (no markdown):\n` +
       `{"type":"word|phrase","original":"${this._escapeQuotes(selected)}",` +
       `"phonetic":"IPA or empty","partOfSpeech":"n./v./adj./adv./phr.",` +
-      `"translation":"concise Chinese meaning","reasoning":"1 sentence why",` +
-      `"examples":["原文例句 + 中文翻译"]}\n\n` +
+      `"translation":"concise context-appropriate translation","reasoning":"1 sentence explaining the contextual meaning"}\n\n` +
       `Selected: ${selected}\n` +
       `Sentence: ${sentence}\n` +
       (surrounding ? `Context: ${surrounding}\n` : "") +

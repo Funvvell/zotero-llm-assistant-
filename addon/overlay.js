@@ -463,20 +463,11 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
     if (llmData && llmData.reasoning) {
       const rDiv = ownerDoc.createElement("div");
       rDiv.style.cssText = "color:#1e40af;font-size:11px;margin-bottom:4px;padding:3px 6px;border-left:2px solid #3b82f6;background:#f0f7ff;border-radius:2px;";
-      rDiv.innerHTML = `<strong>分析：</strong>${_escHtml(llmData.reasoning)}`;
+      rDiv.innerHTML = `<strong>语境分析：</strong>${_escHtml(llmData.reasoning)}`;
       indicator.appendChild(rDiv);
     }
 
-    // 5) Examples
-    if (llmData && llmData.examples && llmData.examples.length > 0) {
-      const exDiv = ownerDoc.createElement("div");
-      exDiv.style.cssText = "font-size:11px;color:#555;border-top:1px dashed #e5e7eb;padding-top:4px;margin-top:2px;";
-      exDiv.innerHTML = `<div style="color:#888;margin-bottom:2px;">例句：</div>` +
-        llmData.examples.map(ex => `<div style="margin-bottom:2px;"> ${_escHtml(ex)}</div>`).join("");
-      indicator.appendChild(exDiv);
-    }
-
-    // 6) LLM still loading hint
+    // 5) LLM still loading hint
     if (!llmData && tradData) {
       const hint = ownerDoc.createElement("div");
       hint.style.cssText = "color:#999;font-size:10px;margin-top:3px;font-style:italic;";
