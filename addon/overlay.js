@@ -640,38 +640,18 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
       Zotero.debug(`[LLM Assistant] pin: attachment key=${attachment.key}, id=${attachment.id}`);
 
       // ── Build position from saved selection annotation ──
-      // For "text" type annotations, Zotero places a sticky-note icon at
-      // the top-left of the first rect.  To avoid covering the selected
-      // text, we collapse the rect to a zero-width point at the RIGHT
-      // edge of the last selection rect, so the icon sits beside the text.
+      // Use "highlight" type: highlights the selected text on the PDF,
+      // with the translation word in the annotation comment.
+      // This is visible directly on the PDF (highlighted text) and in
+      // the sidebar / on hover (comment with translation).
       let position = null;
+      let selectedText = "";
 
       if (_lastSelectionAnnotation && _lastSelectionAnnotation.position) {
-        const orig = _lastSelectionAnnotation.position;
-        const origRects = orig.rects || [];
-        if (origRects.length > 0) {
-          // Find the maximum right edge across all rects
-          let maxRight = 0;
-          let refTop = origRects[0][1];
-          let refBottom = origRects[0][3];
-          for (const r of origRects) {
-            // rect format: [x1, y1, x2, y2] (left, bottom, right, top in PDF coords)
-            if (r[2] > maxRight) {
-              maxRight = r[2];
-              refTop = r[1];
-              refBottom = r[3];
-            }
-          }
-          // Place icon at the right edge with a small offset
-          const iconX = maxRight + 5;
-          position = {
-            pageIndex: orig.pageIndex,
-            rects: [[iconX, refBottom, iconX, refTop]],
-          };
-        } else {
-          position = Object.assign({}, orig);
-        }
-        Zotero.debug(`[LLM Assistant] pin: using selection position, pageIndex=${position.pageIndex}`);
+        // Use the original selection position directly (same rects as the text)
+        position = Object.assign({}, _lastSelectionAnnotation.position);
+        selectedText = _lastSelectionAnnotation.text || "";
+        Zotero.debug(`[LLM Assistant] pin: using selection position, pageIndex=${position.pageIndex}, rects=${(position.rects||[]).length}`);
       }
 
       if (!position) {
@@ -686,12 +666,11 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
               const pageDiv = range.startContainer?.parentNode?.closest?.(".page");
               const pageIndex = pageDiv ? parseInt(pageDiv.getAttribute("data-page-number") || "0") : 0;
               const rect = range.getBoundingClientRect();
-              // Place icon at the right edge of the selection
-              const iconX = rect.right + 5;
               position = {
                 pageIndex: pageIndex,
-                rects: [[iconX, rect.bottom, iconX, rect.top]],
+                rects: [[rect.left, rect.bottom, rect.right, rect.top]],
               };
+              selectedText = sel.toString().trim();
             }
           }
         } catch (e) {
@@ -724,11 +703,11 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
 
       const json = {
         key: annotationKey,
-        type: "text",
+        type: "highlight",
         color: "#ffd400",
         sortIndex: sortIndex,
         position: position,
-        text: "",
+        text: selectedText,
         comment: word,
         pageLabel: _lastSelectionAnnotation?.pageLabel || "",
         tags: [],
