@@ -314,7 +314,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
         const indicator = doc.createElement("div");
         indicator.className = "llm-assistant-loading";
         indicator.textContent = "正在翻译...";
-        indicator.style.cssText = "padding: 6px 8px; font-size: 12px; color: #888;";
+        indicator.style.cssText = "padding: 6px 8px; font-size: 12px; color: #888; max-height: 260px; overflow-y: auto; word-wrap: break-word; overflow-wrap: break-word; max-width: 360px;";
         append(indicator);
         _popupIndicator = indicator;
         _popupDoc = doc;
@@ -409,7 +409,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
 
     // ── Build merged content ──
     indicator.innerHTML = "";
-    indicator.style.cssText = "padding: 4px 0; font-size: 12px; line-height: 1.6;";
+    indicator.style.cssText = "padding: 4px 0; font-size: 12px; line-height: 1.6; max-height: 260px; overflow-y: auto; word-wrap: break-word; overflow-wrap: break-word; max-width: 360px;";
 
     const type = (llmData && llmData.type) || (original.includes(" ") ? "phrase" : "word");
     const tagColor = type === "phrase" ? "#7c3aed" : "#2563eb";
@@ -419,7 +419,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
 
     // 1) Header: tag + original + phonetic + POS
     const header = ownerDoc.createElement("div");
-    header.style.cssText = "margin-bottom: 4px; font-weight: bold; font-size: 14px;";
+    header.style.cssText = "margin-bottom: 4px; font-weight: bold; font-size: 14px; word-wrap: break-word; overflow-wrap: break-word;";
     header.innerHTML =
       `<span style="display:inline-block;background:${tagColor};color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;margin-right:5px;vertical-align:middle;">${tagLabel}</span>` +
       _escHtml(original) +
