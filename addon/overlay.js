@@ -427,6 +427,45 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
       (pos ? ` <span style="color:${tagColor};font-size:11px;font-weight:normal;">${_escHtml(pos)}</span>` : "");
     indicator.appendChild(header);
 
+    // 1b) Audio pronunciation buttons — only for single English words
+    if (/^[a-zA-Z\s'-]+$/.test(original) && !original.includes(" ")) {
+      const audioBox = ownerDoc.createElement("div");
+      audioBox.style.cssText = "display:flex;gap:6px;margin-bottom:6px;";
+
+      const safeWord = encodeURIComponent(original);
+      const audioEntries = [
+        { label: "英", url: `https://dict.youdao.com/dictvoice?audio=${safeWord}&type=1` },
+        { label: "美", url: `https://dict.youdao.com/dictvoice?audio=${safeWord}&type=2` },
+      ];
+
+      for (const entry of audioEntries) {
+        const btn = ownerDoc.createElement("button");
+        btn.textContent = `🔊 ${entry.label}`;
+        btn.style.cssText = "cursor:pointer;border:1px solid #d1d5db;border-radius:4px;padding:2px 8px;font-size:11px;background:#f9fafb;color:#374151;flex:1;";
+        btn.title = `${entry.label}式发音`;
+        const audioUrl = entry.url;
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          try {
+            const win = Zotero.getMainWindow();
+            const audio = new (win.Audio || win.HTMLAudioElement)(audioUrl);
+            audio.play().catch(() => {});
+          } catch {
+            // Fallback: use XMLHttpRequest to play
+            try {
+              const audio = new Audio(audioUrl);
+              audio.play().catch(() => {});
+            } catch { /* audio not available */ }
+          }
+        });
+        // Stop propagation to prevent popup dismissal
+        btn.addEventListener("pointerup", (e) => e.stopPropagation());
+        btn.addEventListener("mousedown", (e) => e.stopPropagation());
+        audioBox.appendChild(btn);
+      }
+      indicator.appendChild(audioBox);
+    }
+
     // 2) Traditional translation — shown FIRST (arrives faster), with word blocks split by semicolons
     if (tradData && tradData.text) {
       const srcLabel = _sourceLabel(tradData.source);
