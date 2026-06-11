@@ -307,8 +307,9 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
     _lastReader = reader || null;
 
     // Capture context IMMEDIATELY while selection still exists in the DOM
-    _lastContext = _getSelectionContext();
-    Zotero.debug(`[LLM Assistant] Context captured: sentence=${!!_lastContext.sentence}, surrounding=${!!_lastContext.surrounding}`);
+    // Pass the event's doc (iframe contentDocument) directly — do NOT re-query
+    _lastContext = _getSelectionContext(doc);
+    Zotero.debug(`[LLM Assistant] Context captured: sentence="${_lastContext.sentence.substring(0, 80)}", surrounding=${!!_lastContext.surrounding}`);
 
     if (!selectedText.trim()) return;
 
@@ -816,28 +817,49 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
     return { text: "", rect: null };
   }
 
-  function _getSelectionContext() {
+  /**
+   * Extract the sentence and surrounding context from the PDF text layer.
+   * @param {Document} doc - The iframe contentDocument from the event (NOT re-queried).
+   */
+  function _getSelectionContext(doc) {
     let sentence = "", surrounding = "";
     try {
-      const win = Zotero.getMainWindow();
-      const iframe = win?.document?.querySelector("#reader-ui iframe");
-      if (!iframe?.contentDocument) {
-        Zotero.debug("[LLM Assistant] context: no iframe");
+      // Use the doc passed from the event — it IS the iframe's contentDocument.
+      // Do NOT re-query via win.document.querySelector("#reader-ui iframe") because
+      // that may find a different iframe or fail entirely.
+      if (!doc) {
+        Zotero.debug("[LLM Assistant] context: no doc provided");
         return { sentence, surrounding };
       }
-      const doc = iframe.contentDocument;
+      Zotero.debug(`[LLM Assistant] context: doc provided, body=${!!doc.body}`);
       const sel = doc.getSelection();
       if (!sel || sel.rangeCount === 0) {
-        Zotero.debug("[LLM Assistant] context: no selection");
+        Zotero.debug("[LLM Assistant] context: no selection in doc");
         return { sentence, surrounding };
       }
-      const textLayer = doc.querySelector(".textLayer") || doc.body;
+      const selectedText = sel.toString().trim();
+      Zotero.debug(`[LLM Assistant] context: selectedText="${selectedText.substring(0, 50)}"`);
+
+      // Find the page where the selection lives — each page has its own .textLayer
+      let textLayer = null;
+      try {
+        const range = sel.getRangeAt(0);
+        const pageDiv = range.startContainer?.parentNode?.closest?.(".page");
+        if (pageDiv) {
+          textLayer = pageDiv.querySelector(".textLayer");
+          Zotero.debug(`[LLM Assistant] context: found textLayer in selection's page`);
+        }
+      } catch { /* */ }
+      // Fallback: first .textLayer or body
       if (!textLayer) {
-        Zotero.debug("[LLM Assistant] context: no textLayer");
+        textLayer = doc.querySelector(".textLayer") || doc.body;
+      }
+      if (!textLayer) {
+        Zotero.debug("[LLM Assistant] context: no textLayer or body");
         return { sentence, surrounding };
       }
       const fullText = textLayer.innerText || textLayer.textContent || "";
-      const selectedText = sel.toString().trim();
+      Zotero.debug(`[LLM Assistant] context: fullText length=${fullText.length}`);
       if (!fullText || !selectedText) {
         Zotero.debug(`[LLM Assistant] context: empty fullText=${!!fullText} selectedText=${!!selectedText}`);
         return { sentence, surrounding };
@@ -861,7 +883,10 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
       sentence = (before.substring(sentenceStart) + selectedText + after.substring(0, sentenceEnd)).replace(/\s+/g, " ").trim();
       const cs = Math.max(0, idx - 200), ce = Math.min(fullText.length, idx + selectedText.length + 200);
       surrounding = fullText.substring(cs, ce).replace(/\s+/g, " ").trim();
-    } catch { /* */ }
+      Zotero.debug(`[LLM Assistant] context: sentence="${sentence.substring(0, 100)}"`);
+    } catch (e) {
+      Zotero.debug(`[LLM Assistant] context error: ${e.message}`);
+    }
     return { sentence, surrounding };
   }
 
