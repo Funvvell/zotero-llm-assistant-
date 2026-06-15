@@ -334,12 +334,23 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
     _lastSelectionAnnotation = params?.annotation || null;
     _lastReader = reader || null;
 
-    // Capture context: try DOM first (sync), then async getFullText() as backup
-    _lastContext = _getSelectionContext(doc, selectedText);
-    Zotero.debug(`[LLM Assistant] DOM context: sentence="${_lastContext.sentence.substring(0, 80)}", surrounding=${!!_lastContext.surrounding}`);
+    // Capture context: try PDFViewerApplication first (async), then DOM (sync)
+    const ctxResult = _getSelectionContext(doc, selectedText, reader);
+    _lastContext = { sentence: ctxResult.sentence, surrounding: ctxResult.surrounding };
+    Zotero.debug(`[LLM Assistant] sync context: sentence="${_lastContext.sentence.substring(0, 80)}", surrounding=${!!_lastContext.surrounding}`);
 
-    // If DOM context failed, try getFullText() async (Zotero's indexed full-text)
-    if (!_lastContext.sentence && reader && reader.itemID) {
+    // Handle async context (PDFViewerApplication or getFullText)
+    if (ctxResult.asyncPromise) {
+      _contextPromise = ctxResult.asyncPromise.then(ctx => {
+        if (ctx.sentence) {
+          _lastContext = ctx;
+          Zotero.debug(`[LLM Assistant] async context resolved: sentence="${ctx.sentence.substring(0, 80)}"`);
+        }
+      }).catch(e => {
+        Zotero.debug(`[LLM Assistant] async context failed: ${e.message}`);
+      });
+    } else if (!_lastContext.sentence && reader && reader.itemID) {
+      // Fallback: use Zotero's indexed full text
       _contextPromise = _fetchFullTextContext(reader.itemID, selectedText).then(ctx => {
         if (ctx.sentence) {
           _lastContext = ctx;
@@ -913,135 +924,309 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
 
   /**
    * Extract the sentence and surrounding context from the PDF text layer.
+   * Tries multiple strategies in order of reliability:
+   *   1. PDFViewerApplication.getTextContent() (most reliable, async)
+   *   2. DOM .textLayer span elements (sync fallback)
+   *   3. DOM innerText/textContent (last resort sync fallback)
+   *
    * @param {Document} doc - The iframe contentDocument from the event.
    * @param {string} selectedText - The selected text from params.annotation.text.
+   * @param {Object} [reader] - The ReaderInstance from the event (for PDFViewerApplication access).
+   * @returns {{ sentence: string, surrounding: string, asyncPromise: Promise|null }}
+   *          asyncPromise is set when PDFViewerApplication approach is attempted;
+   *          the caller should await it before using sentence/surrounding.
    */
-  function _getSelectionContext(doc, selectedText) {
+  function _getSelectionContext(doc, selectedText, reader) {
     let sentence = "", surrounding = "";
+    let asyncPromise = null;
+
     try {
       if (!doc) {
         Zotero.debug("[LLM Assistant] context: no doc provided");
-        return { sentence, surrounding };
+        return { sentence, surrounding, asyncPromise };
       }
       Zotero.debug(`[LLM Assistant] context: selectedText="${(selectedText||'').substring(0,60)}"`);
 
-      // Strategy: find the full text of the current page and locate the selection within it.
-      // Try multiple approaches since PDF.js DOM structure varies across Zotero versions.
-      let fullText = "";
-
-      // --- Approach 1: Find .textLayer elements ---
-      const textLayers = doc.querySelectorAll(".textLayer");
-      Zotero.debug(`[LLM Assistant] context: .textLayer count=${textLayers.length}`);
-
-      // --- Approach 2: Find .page elements and get their text ---
-      const pages = doc.querySelectorAll(".page");
-      Zotero.debug(`[LLM Assistant] context: .page count=${pages.length}`);
-
-      // --- Approach 3: Dump a sample of body children class names for debugging ---
-      if (doc.body) {
-        const sample = [];
-        const children = doc.body.children;
-        for (let i = 0; i < Math.min(children.length, 10); i++) {
-          sample.push(`${children[i].tagName}.${children[i].className.substring(0, 40)}`);
-        }
-        Zotero.debug(`[LLM Assistant] context: body children=[${sample.join(", ")}]`);
-      }
-
-      // Normalize the selected text for matching
       const normalizedSelected = (selectedText || "").replace(/\s+/g, " ").trim();
-
-      // Try to find the page containing the selection
-      if (normalizedSelected && pages.length > 0) {
-        const lowerSelected = normalizedSelected.toLowerCase();
-        for (const page of pages) {
-          // Try .textLayer first, then the page itself
-          const layer = page.querySelector(".textLayer");
-          const source = layer || page;
-          
-          // IMPROVED: Extract text from span elements in textLayer (PDF.js uses absolute-positioned spans)
-          let pageText = "";
-          if (layer) {
-            const spans = layer.querySelectorAll("span");
-            if (spans.length > 0) {
-              // Collect text from all spans, preserving order
-              pageText = Array.from(spans).map(s => s.textContent).join(" ").replace(/\s+/g, " ").trim();
-              Zotero.debug(`[LLM Assistant] context: extracted from ${spans.length} spans (len=${pageText.length})`);
-            }
-          }
-          
-          // Fallback to innerText/textContent
-          if (!pageText) {
-            pageText = (source.innerText || source.textContent || "").replace(/\s+/g, " ").trim();
-          }
-          
-          if (pageText.toLowerCase().includes(lowerSelected)) {
-            fullText = pageText;
-            Zotero.debug(`[LLM Assistant] context: found in page (len=${fullText.length})`);
-            break;
-          }
-        }
+      if (!normalizedSelected) {
+        return { sentence, surrounding, asyncPromise };
       }
 
-      // Fallback: use body text
-      if (!fullText && doc.body) {
+      // ── Strategy 1 (BEST): Use PDFViewerApplication.getTextContent() ──
+      // This is the official PDF.js API, accessed via reader._iframeWindow
+      // as documented in https://zotero-chinese.com/plugin-dev-guide/reference/more
+      if (reader && reader._iframeWindow) {
+        asyncPromise = _getContextViaPDFViewer(reader._iframeWindow, normalizedSelected);
+        return { sentence, surrounding, asyncPromise };
+      }
+
+      // ── Strategy 2: DOM .textLayer span elements (sync) ──
+      const domResult = _getContextViaDOM(doc, normalizedSelected);
+      if (domResult.sentence) {
+        return { sentence: domResult.sentence, surrounding: domResult.surrounding, asyncPromise: null };
+      }
+
+      // ── Strategy 3: Fallback to body text ──
+      if (doc.body) {
         const bodyText = (doc.body.innerText || doc.body.textContent || "").replace(/\s+/g, " ").trim();
         if (bodyText.length > 10) {
-          fullText = bodyText;
-          Zotero.debug(`[LLM Assistant] context: using body text (len=${fullText.length})`);
+          const ctx = _extractContextFromText(bodyText, normalizedSelected);
+          if (ctx.sentence) {
+            return { sentence: ctx.sentence, surrounding: ctx.surrounding, asyncPromise: null };
+          }
         }
       }
 
-      if (!fullText || !normalizedSelected) {
-        Zotero.debug(`[LLM Assistant] context: empty fullText=${!!fullText} selected=${!!normalizedSelected}`);
-        return { sentence, surrounding };
-      }
-
-      // Search for the selected text in the full page text
-      const idx = fullText.toLowerCase().indexOf(normalizedSelected.toLowerCase());
-      Zotero.debug(`[LLM Assistant] context: indexOf=${idx}`);
-
-      if (idx < 0) {
-        // Try searching for the first few words only (handles whitespace mismatches)
-        const words = normalizedSelected.split(/\s+/);
-        const shortSearch = words.slice(0, Math.min(3, words.length)).join(" ");
-        const idx2 = fullText.toLowerCase().indexOf(shortSearch.toLowerCase());
-        Zotero.debug(`[LLM Assistant] context: partial search "${shortSearch}" indexOf=${idx2}`);
-        if (idx2 >= 0) {
-          // Use partial match position
-          const cs = Math.max(0, idx2 - 300);
-          const ce = Math.min(fullText.length, idx2 + 500);
-          sentence = fullText.substring(cs, ce).replace(/\s+/g, " ").trim();
-          surrounding = sentence;
-          return { sentence, surrounding };
-        }
-        // Last fallback: use the full page text as context
-        sentence = fullText.substring(0, 1500);
-        surrounding = fullText.substring(0, 1500);
-        return { sentence, surrounding };
-      }
-
-      // Extract the sentence containing the selection
-      const SENTENCE_END = /[.!?。！？]\s/g;
-      const before = fullText.substring(0, idx);
-      const after = fullText.substring(idx + normalizedSelected.length);
-      let sentenceStart = 0, m;
-      const bRe = new RegExp(SENTENCE_END, "g");
-      while ((m = bRe.exec(before)) !== null) sentenceStart = m.index + m[0].length;
-      const aRe = new RegExp(SENTENCE_END, "g");
-      const firstAfter = aRe.exec(after);
-      let sentenceEnd = after.length;
-      if (firstAfter) sentenceEnd = firstAfter.index + firstAfter[0].length;
-      sentence = (before.substring(sentenceStart) + normalizedSelected + after.substring(0, sentenceEnd)).replace(/\s+/g, " ").trim();
-
-      // Extract surrounding context (±300 chars around the selection)
-      const cs = Math.max(0, idx - 300), ce = Math.min(fullText.length, idx + normalizedSelected.length + 300);
-      surrounding = fullText.substring(cs, ce).replace(/\s+/g, " ").trim();
-
-      Zotero.debug(`[LLM Assistant] context: sentence="${sentence.substring(0, 120)}"`);
+      Zotero.debug("[LLM Assistant] context: all strategies failed");
     } catch (e) {
       Zotero.debug(`[LLM Assistant] context error: ${e.message}`);
     }
-    return { sentence, surrounding };
+    return { sentence, surrounding, asyncPromise };
+  }
+
+  /**
+   * Strategy 1: Extract context using PDFViewerApplication.getTextContent().
+   * This is the most reliable method because it reads text directly from the PDF
+   * data, bypassing DOM rendering issues (absolute-positioned spans, lazy loading, etc.)
+   *
+   * Reference: https://zotero-chinese.com/plugin-dev-guide/reference/more
+   *   const reader = Zotero.Reader.getByTabID(Zotero_Tabs.selectedID);
+   *   const PDFViewerApplication = reader._iframeWindow.wrappedJSObject.PDFViewerApplication;
+   *   const pages = PDFViewerApplication.pdfViewer._pages;
+   *   const items = (await pages[0].pdfPage.getTextContent()).items;
+   *
+   * @param {Window} iframeWindow - The reader's _iframeWindow
+   * @param {string} normalizedSelected - The normalized selected text
+   * @returns {Promise<{sentence:string, surrounding:string}>}
+   */
+  async function _getContextViaPDFViewer(iframeWindow, normalizedSelected) {
+    const result = { sentence: "", surrounding: "" };
+    try {
+      // Access PDFViewerApplication via wrappedJSObject (Zotero convention)
+      let PDFViewerApplication;
+      try {
+        PDFViewerApplication = iframeWindow.wrappedJSObject?.PDFViewerApplication
+          || iframeWindow.PDFViewerApplication;
+      } catch (e) {
+        Zotero.debug(`[LLM Assistant] PDFViewer: access failed: ${e.message}`);
+      }
+      if (!PDFViewerApplication) {
+        Zotero.debug("[LLM Assistant] PDFViewer: PDFViewerApplication not found");
+        return result;
+      }
+
+      // Wait for PDF to finish loading
+      try {
+        if (PDFViewerApplication.pdfLoadingTask) {
+          await PDFViewerApplication.pdfLoadingTask.promise;
+        }
+        if (PDFViewerApplication.pdfViewer && PDFViewerApplication.pdfViewer.pagesPromise) {
+          await PDFViewerApplication.pdfViewer.pagesPromise;
+        }
+      } catch (e) {
+        Zotero.debug(`[LLM Assistant] PDFViewer: wait failed: ${e.message}`);
+      }
+
+      const pages = PDFViewerApplication.pdfViewer?._pages;
+      if (!pages || !pages.length) {
+        Zotero.debug("[LLM Assistant] PDFViewer: no pages available");
+        return result;
+      }
+
+      // Get current page number (1-based in PDFViewer, 0-based in _pages)
+      const currentPage = PDFViewerApplication.pdfViewer.currentPageNumber || 1;
+
+      // Try current page first, then adjacent pages
+      const pageIndices = [currentPage - 1]; // current page (0-based)
+      if (currentPage > 1) pageIndices.push(currentPage - 2); // previous page
+      if (currentPage < pages.length) pageIndices.push(currentPage); // next page
+
+      for (const pi of pageIndices) {
+        if (pi < 0 || pi >= pages.length) continue;
+        const page = pages[pi];
+        if (!page || !page.pdfPage) continue;
+
+        try {
+          const textContent = await page.pdfPage.getTextContent();
+          if (!textContent || !textContent.items || !textContent.items.length) continue;
+
+          // Merge text items into a continuous string, using transform coordinates
+          // to detect line breaks (significant y-coordinate change = new line)
+          const pageText = _mergeTextItems(textContent.items);
+          Zotero.debug(`[LLM Assistant] PDFViewer: page ${pi + 1} text len=${pageText.length}`);
+
+          const ctx = _extractContextFromText(pageText, normalizedSelected);
+          if (ctx.sentence) {
+            result.sentence = ctx.sentence;
+            result.surrounding = ctx.surrounding;
+            Zotero.debug(`[LLM Assistant] PDFViewer: found on page ${pi + 1}, sentence="${ctx.sentence.substring(0, 80)}"`);
+            return result;
+          }
+        } catch (e) {
+          Zotero.debug(`[LLM Assistant] PDFViewer: page ${pi + 1} getTextContent failed: ${e.message}`);
+        }
+      }
+
+      Zotero.debug("[LLM Assistant] PDFViewer: selected text not found on any nearby page");
+    } catch (e) {
+      Zotero.debug(`[LLM Assistant] PDFViewer error: ${e.message}`);
+    }
+    return result;
+  }
+
+  /**
+   * Merge PDF text items into a continuous string.
+   * Uses transform coordinates to detect line breaks:
+   *   - If y-coordinate changes significantly → insert newline
+   *   - If x-coordinate jumps backward → insert newline
+   *   - Otherwise → space between items
+   *
+   * This handles the common case where PDF.js splits a line into multiple
+   * items with absolute positioning.
+   *
+   * @param {Array} items - Text items from getTextContent()
+   * @returns {string} Merged text
+   */
+  function _mergeTextItems(items) {
+    if (!items || !items.length) return "";
+    const lines = [];
+    let currentLine = "";
+    let lastY = null;
+    let lastXEnd = null;
+    const LINE_HEIGHT_THRESHOLD = 2; // pixels tolerance for same-line detection
+
+    for (const item of items) {
+      if (!item.str) continue;
+      const x = item.transform[4];
+      const y = item.transform[5];
+      const width = item.width || 0;
+
+      if (lastY !== null) {
+        const yDiff = Math.abs(y - lastY);
+        // Significant Y change = new line
+        if (yDiff > LINE_HEIGHT_THRESHOLD) {
+          if (currentLine.trim()) lines.push(currentLine.trim());
+          currentLine = "";
+          lastXEnd = null;
+        } else if (lastXEnd !== null && x < lastXEnd - 2) {
+          // X went backward on same line = new column/paragraph
+          if (currentLine.trim()) lines.push(currentLine.trim());
+          currentLine = "";
+        } else {
+          // Same line, add space
+          currentLine += " ";
+        }
+      }
+
+      currentLine += item.str;
+      lastY = y;
+      lastXEnd = x + width;
+    }
+
+    if (currentLine.trim()) lines.push(currentLine.trim());
+    return lines.join("\n").replace(/\s+/g, " ").trim();
+  }
+
+  /**
+   * Strategy 2: Extract context from DOM .textLayer span elements (sync).
+   * This works when the textLayer has been rendered but PDFViewerApplication
+   * is not accessible.
+   */
+  function _getContextViaDOM(doc, normalizedSelected) {
+    const result = { sentence: "", surrounding: "" };
+    try {
+      const pages = doc.querySelectorAll(".page");
+      if (!pages.length) return result;
+
+      const lowerSelected = normalizedSelected.toLowerCase();
+      for (const page of pages) {
+        const layer = page.querySelector(".textLayer");
+        if (!layer) continue;
+
+        // Extract text from span elements (PDF.js uses absolute-positioned spans)
+        const spans = layer.querySelectorAll("span");
+        let pageText = "";
+        if (spans.length > 0) {
+          pageText = Array.from(spans).map(s => s.textContent).join(" ").replace(/\s+/g, " ").trim();
+          Zotero.debug(`[LLM Assistant] DOM context: extracted from ${spans.length} spans (len=${pageText.length})`);
+        }
+
+        // Fallback to innerText/textContent
+        if (!pageText) {
+          pageText = (layer.innerText || layer.textContent || "").replace(/\s+/g, " ").trim();
+        }
+
+        if (pageText.toLowerCase().includes(lowerSelected)) {
+          Zotero.debug(`[LLM Assistant] DOM context: found in page (len=${pageText.length})`);
+          const ctx = _extractContextFromText(pageText, normalizedSelected);
+          if (ctx.sentence) return ctx;
+        }
+      }
+    } catch (e) {
+      Zotero.debug(`[LLM Assistant] DOM context error: ${e.message}`);
+    }
+    return result;
+  }
+
+  /**
+   * Extract sentence and surrounding context from a full text string.
+   * Shared by all extraction strategies.
+   *
+   * @param {string} fullText - The full text to search in
+   * @param {string} normalizedSelected - The normalized selected text to find
+   * @returns {{sentence:string, surrounding:string}}
+   */
+  function _extractContextFromText(fullText, normalizedSelected) {
+    const result = { sentence: "", surrounding: "" };
+    if (!fullText || !normalizedSelected) return result;
+
+    const normalizedFull = fullText.replace(/\s+/g, " ").trim();
+    const lowerFull = normalizedFull.toLowerCase();
+    const lowerSelected = normalizedSelected.toLowerCase();
+
+    // Try exact match first
+    let idx = lowerFull.indexOf(lowerSelected);
+
+    if (idx < 0) {
+      // Try first few words (handles whitespace mismatches)
+      const words = normalizedSelected.split(/\s+/);
+      const shortSearch = words.slice(0, Math.min(3, words.length)).join(" ");
+      idx = lowerFull.indexOf(shortSearch.toLowerCase());
+      Zotero.debug(`[LLM Assistant] extractContext: partial search "${shortSearch}" idx=${idx}`);
+
+      if (idx >= 0) {
+        const cs = Math.max(0, idx - 300);
+        const ce = Math.min(normalizedFull.length, idx + 500);
+        result.sentence = normalizedFull.substring(cs, ce);
+        result.surrounding = result.sentence;
+        return result;
+      }
+
+      // Last fallback: use beginning of text as context
+      result.sentence = normalizedFull.substring(0, 1500);
+      result.surrounding = result.sentence;
+      return result;
+    }
+
+    // Extract the sentence containing the selection
+    const SENTENCE_END = /[.!?。！？]\s/g;
+    const before = normalizedFull.substring(0, idx);
+    const after = normalizedFull.substring(idx + normalizedSelected.length);
+    let sentenceStart = 0, m;
+    const bRe = new RegExp(SENTENCE_END, "g");
+    while ((m = bRe.exec(before)) !== null) sentenceStart = m.index + m[0].length;
+    const aRe = new RegExp(SENTENCE_END, "g");
+    const firstAfter = aRe.exec(after);
+    let sentenceEnd = after.length;
+    if (firstAfter) sentenceEnd = firstAfter.index + firstAfter[0].length;
+    result.sentence = (before.substring(sentenceStart) + normalizedSelected + after.substring(0, sentenceEnd)).replace(/\s+/g, " ").trim();
+
+    // Extract surrounding context (±300 chars around the selection)
+    const cs = Math.max(0, idx - 300), ce = Math.min(normalizedFull.length, idx + normalizedSelected.length + 300);
+    result.surrounding = normalizedFull.substring(cs, ce).replace(/\s+/g, " ").trim();
+
+    Zotero.debug(`[LLM Assistant] extractContext: sentence="${result.sentence.substring(0, 120)}"`);
+    return result;
   }
 
   /**
