@@ -29,6 +29,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
   let _lastSelectionAnnotation = null;  // params.annotation from renderTextSelectionPopup
   let _lastReader = null;              // reader instance for getting attachment
   let _lastContext = { sentence: "", surrounding: "" };  // captured immediately on selection
+  let _contextPromise = null;          // tracks async context fetch to avoid race condition
 
   // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -212,12 +213,19 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
       // ── LLM translation: adds analysis on top ──
       let llmData = null;
       try {
+        // Wait for async context (getFullText) to complete before building prompt
+        if (_contextPromise) {
+          Zotero.debug("[LLM Assistant] Waiting for async context...");
+          try { await _contextPromise; } catch { /* already handled */ }
+          Zotero.debug(`[LLM Assistant] Async context completed: sentence="${(_lastContext.sentence||'').substring(0,60)}"`);
+        }
         // Use context captured at selection time (selection may be gone by now)
         const { sentence, surrounding } = _lastContext;
-        Zotero.debug(`[LLM Assistant] LLM prompt context: sentence="${(sentence||'').substring(0,60)}", surrounding=${!!surrounding}`);
+        Zotero.debug(`[LLM Assistant] LLM prompt context: sentence="${(sentence||'').substring(0,60)}", surrounding=${!!surrounding}, surroundingLen=${(surrounding||'').length}`);
         const prompt = prompts().buildContextAwareTranslatePrompt({
           selected: trimmed, sentence: sentence || trimmed, surrounding, fullText: "",
         });
+        Zotero.debug(`[LLM Assistant] LLM prompt built: len=${prompt.length}, hasSentence=${!!sentence}, hasSurrounding=${!!surrounding}`);
         const messages = [{ role: "user", content: prompt }];
 
         llmData = await Promise.race([
@@ -332,7 +340,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
 
     // If DOM context failed, try getFullText() async (Zotero's indexed full-text)
     if (!_lastContext.sentence && reader && reader.itemID) {
-      _fetchFullTextContext(reader.itemID, selectedText).then(ctx => {
+      _contextPromise = _fetchFullTextContext(reader.itemID, selectedText).then(ctx => {
         if (ctx.sentence) {
           _lastContext = ctx;
           Zotero.debug(`[LLM Assistant] FullText context: sentence="${ctx.sentence.substring(0, 80)}"`);
@@ -340,6 +348,8 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
       }).catch(e => {
         Zotero.debug(`[LLM Assistant] FullText context failed: ${e.message}`);
       });
+    } else {
+      _contextPromise = null;
     }
 
     if (!selectedText.trim()) return;
@@ -947,7 +957,23 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
           // Try .textLayer first, then the page itself
           const layer = page.querySelector(".textLayer");
           const source = layer || page;
-          const pageText = (source.innerText || source.textContent || "").replace(/\s+/g, " ").trim();
+          
+          // IMPROVED: Extract text from span elements in textLayer (PDF.js uses absolute-positioned spans)
+          let pageText = "";
+          if (layer) {
+            const spans = layer.querySelectorAll("span");
+            if (spans.length > 0) {
+              // Collect text from all spans, preserving order
+              pageText = Array.from(spans).map(s => s.textContent).join(" ").replace(/\s+/g, " ").trim();
+              Zotero.debug(`[LLM Assistant] context: extracted from ${spans.length} spans (len=${pageText.length})`);
+            }
+          }
+          
+          // Fallback to innerText/textContent
+          if (!pageText) {
+            pageText = (source.innerText || source.textContent || "").replace(/\s+/g, " ").trim();
+          }
+          
           if (pageText.toLowerCase().includes(lowerSelected)) {
             fullText = pageText;
             Zotero.debug(`[LLM Assistant] context: found in page (len=${fullText.length})`);
