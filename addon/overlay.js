@@ -340,8 +340,11 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
     Zotero.debug(`[LLM Assistant] sync context: sentence="${_lastContext.sentence.substring(0, 80)}", surrounding=${!!_lastContext.surrounding}`);
 
     // Handle async context (PDFViewerApplication or getFullText)
+    // Use requestID to prevent stale callbacks from overwriting newer context
+    const contextRequestID = ++_translateRequestID;
     if (ctxResult.asyncPromise) {
       _contextPromise = ctxResult.asyncPromise.then(ctx => {
+        if (contextRequestID !== _translateRequestID) return; // stale, discard
         if (ctx.sentence) {
           _lastContext = ctx;
           Zotero.debug(`[LLM Assistant] async context resolved: sentence="${ctx.sentence.substring(0, 80)}"`);
@@ -352,6 +355,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
     } else if (!_lastContext.sentence && reader && reader.itemID) {
       // Fallback: use Zotero's indexed full text
       _contextPromise = _fetchFullTextContext(reader.itemID, selectedText).then(ctx => {
+        if (contextRequestID !== _translateRequestID) return; // stale, discard
         if (ctx.sentence) {
           _lastContext = ctx;
           Zotero.debug(`[LLM Assistant] FullText context: sentence="${ctx.sentence.substring(0, 80)}"`);
@@ -1015,13 +1019,20 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
         return result;
       }
 
-      // Wait for PDF to finish loading
+      // Wait for PDF to finish loading (with timeout to prevent hanging)
       try {
+        const loadPromises = [];
         if (PDFViewerApplication.pdfLoadingTask) {
-          await PDFViewerApplication.pdfLoadingTask.promise;
+          loadPromises.push(PDFViewerApplication.pdfLoadingTask.promise);
         }
         if (PDFViewerApplication.pdfViewer && PDFViewerApplication.pdfViewer.pagesPromise) {
-          await PDFViewerApplication.pdfViewer.pagesPromise;
+          loadPromises.push(PDFViewerApplication.pdfViewer.pagesPromise);
+        }
+        if (loadPromises.length > 0) {
+          await Promise.race([
+            Promise.all(loadPromises),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+          ]);
         }
       } catch (e) {
         Zotero.debug(`[LLM Assistant] PDFViewer: wait failed: ${e.message}`);
@@ -1093,7 +1104,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
     let currentLine = "";
     let lastY = null;
     let lastXEnd = null;
-    const LINE_HEIGHT_THRESHOLD = 2; // pixels tolerance for same-line detection
+    const LINE_HEIGHT_THRESHOLD = 3; // PDF points tolerance for same-line detection
 
     for (const item of items) {
       if (!item.str) continue;
@@ -1255,39 +1266,12 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
         return result;
       }
       Zotero.debug(`[LLM Assistant] FullText: length=${fullText.length}`);
-      // Normalize and search
-      const normalized = fullText.replace(/\s+/g, " ").trim();
       const normalizedSelected = selectedText.replace(/\s+/g, " ").trim();
-      const idx = normalized.toLowerCase().indexOf(normalizedSelected.toLowerCase());
-      Zotero.debug(`[LLM Assistant] FullText: indexOf=${idx}`);
-      if (idx < 0) {
-        // Try first few words
-        const words = normalizedSelected.split(/\s+/);
-        const short = words.slice(0, Math.min(3, words.length)).join(" ");
-        const idx2 = normalized.toLowerCase().indexOf(short.toLowerCase());
-        if (idx2 >= 0) {
-          const cs = Math.max(0, idx2 - 400);
-          const ce = Math.min(normalized.length, idx2 + 600);
-          result.sentence = normalized.substring(cs, ce);
-          result.surrounding = result.sentence;
-          return result;
-        }
-        return result;
+      const ctx = _extractContextFromText(fullText, normalizedSelected);
+      if (ctx.sentence) {
+        result.sentence = ctx.sentence;
+        result.surrounding = ctx.surrounding;
       }
-      // Extract sentence
-      const SENTENCE_END = /[.!?。！？]\s/g;
-      const before = normalized.substring(0, idx);
-      const after = normalized.substring(idx + normalizedSelected.length);
-      let sentenceStart = 0, m;
-      const bRe = new RegExp(SENTENCE_END, "g");
-      while ((m = bRe.exec(before)) !== null) sentenceStart = m.index + m[0].length;
-      const aRe = new RegExp(SENTENCE_END, "g");
-      const firstAfter = aRe.exec(after);
-      let sentenceEnd = after.length;
-      if (firstAfter) sentenceEnd = firstAfter.index + firstAfter[0].length;
-      result.sentence = (before.substring(sentenceStart) + normalizedSelected + after.substring(0, sentenceEnd)).trim();
-      const cs = Math.max(0, idx - 400), ce = Math.min(normalized.length, idx + normalizedSelected.length + 400);
-      result.surrounding = normalized.substring(cs, ce).trim();
       Zotero.debug(`[LLM Assistant] FullText: sentence="${result.sentence.substring(0, 100)}"`);
     } catch (e) {
       Zotero.debug(`[LLM Assistant] FullText error: ${e.message}`);
