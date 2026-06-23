@@ -21,6 +21,11 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
   let _translateRequestID = 0;
   let _translateDebounceTimer = null;
 
+  // Cache for PDF page text (key: "itemID:pageIndex", value: {text, ts})
+  // Avoids repeated getTextContent() calls when selecting multiple words on the same page
+  const _pageTextCache = new Map();
+  const PAGE_TEXT_CACHE_TTL = 60000; // 60 seconds
+
   // Popup context for progressive update
   let _popupIndicator = null;
   let _popupDoc = null;
@@ -184,6 +189,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
       if (!trimmed) { ui().showError("选中的内容为空。"); return; }
 
       const requestID = ++_translateRequestID;
+      _streamAccumulated = "";
       ui().showLoading("正在翻译...");
 
       // ── Traditional translation: show IMMEDIATELY when ready ──
@@ -213,11 +219,18 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
       // ── LLM translation: adds analysis on top ──
       let llmData = null;
       try {
-        // Wait for async context (getFullText) to complete before building prompt
+        // Wait for async context, but with a short timeout (500ms).
+        // Context fetch (getTextContent) can take 1-5s; don't let it block the LLM call.
+        // If context isn't ready in 500ms, proceed with sync context (or just the selected text).
         if (_contextPromise) {
-          Zotero.debug("[LLM Assistant] Waiting for async context...");
-          try { await _contextPromise; } catch { /* already handled */ }
-          Zotero.debug(`[LLM Assistant] Async context completed: sentence="${(_lastContext.sentence||'').substring(0,60)}"`);
+          Zotero.debug("[LLM Assistant] Waiting for async context (500ms timeout)...");
+          try {
+            await Promise.race([
+              _contextPromise,
+              new Promise(resolve => setTimeout(resolve, 500)),
+            ]);
+          } catch { /* already handled */ }
+          Zotero.debug(`[LLM Assistant] Context phase done: sentence="${(_lastContext.sentence||'').substring(0,60)}"`);
         }
         // Use context captured at selection time (selection may be gone by now)
         const { sentence, surrounding } = _lastContext;
@@ -228,17 +241,44 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
         Zotero.debug(`[LLM Assistant] LLM prompt built: len=${prompt.length}, hasSentence=${!!sentence}, hasSurrounding=${!!surrounding}`);
         const messages = [{ role: "user", content: prompt }];
 
-        llmData = await Promise.race([
-          (async () => {
-            if (requestID !== _translateRequestID) return null;
-            const raw = await client().chat(messages);
-            if (requestID !== _translateRequestID) return null;
-            return _parseLlmResponse(raw, trimmed);
-          })(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("LLM 请求超时 (20s)")), 20000)
-          ),
-        ]);
+        // Use streaming if available — shows partial results progressively
+        const hasStream = typeof client().chatStream === "function";
+        let raw;
+        if (hasStream) {
+          // Stream: update popup as tokens arrive (faster perceived speed)
+          raw = await Promise.race([
+            (async () => {
+              if (requestID !== _translateRequestID) return "";
+              const streamResult = await client().chatStream(messages, {
+                timeout: 20000,
+                onChunk: (delta) => {
+                  if (requestID !== _translateRequestID) return;
+                  // Show streaming progress in popup (traditional already shown)
+                  _showStreamProgress(delta);
+                },
+              });
+              if (requestID !== _translateRequestID) return "";
+              return streamResult;
+            })(),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("LLM 请求超时 (20s)")), 20000)
+            ),
+          ]);
+        } else {
+          // Fallback: non-streaming
+          raw = await Promise.race([
+            (async () => {
+              if (requestID !== _translateRequestID) return null;
+              const r = await client().chat(messages);
+              if (requestID !== _translateRequestID) return null;
+              return r;
+            })(),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("LLM 请求超时 (20s)")), 20000)
+            ),
+          ]);
+        }
+        if (raw) llmData = _parseLlmResponse(raw, trimmed);
       } catch (e) {
         Zotero.debug(`[LLM Assistant] LLM error: ${e.message}`);
       }
@@ -396,7 +436,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
       } catch (e) {
         Zotero.logError(`[LLM Assistant] auto-translate failed: ${e.message}`);
       }
-    }, 300);
+    }, 200);
   };
 
   // ── Private helpers ──────────────────────────────────────────────────
@@ -1052,19 +1092,36 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
       if (currentPage > 1) pageIndices.push(currentPage - 2); // previous page
       if (currentPage < pages.length) pageIndices.push(currentPage); // next page
 
+      // Determine cache key prefix from reader itemID if available
+      let cachePrefix = "unknown";
+      try {
+        // Try to get itemID from the iframe window's reader context
+        const win = Zotero.getMainWindow();
+        const tabsAPI = win?.Zotero_Tabs;
+        const activeReader = tabsAPI && Zotero.Reader?.getByTabID ? Zotero.Reader.getByTabID(tabsAPI.selectedID) : null;
+        if (activeReader?.itemID) cachePrefix = String(activeReader.itemID);
+      } catch { /* ignore */ }
+
       for (const pi of pageIndices) {
         if (pi < 0 || pi >= pages.length) continue;
         const page = pages[pi];
         if (!page || !page.pdfPage) continue;
 
         try {
-          const textContent = await page.pdfPage.getTextContent();
-          if (!textContent || !textContent.items || !textContent.items.length) continue;
-
-          // Merge text items into a continuous string, using transform coordinates
-          // to detect line breaks (significant y-coordinate change = new line)
-          const pageText = _mergeTextItems(textContent.items);
-          Zotero.debug(`[LLM Assistant] PDFViewer: page ${pi + 1} text len=${pageText.length}`);
+          // Check cache first
+          const cacheKey = `${cachePrefix}:${pi}`;
+          const cached = _pageTextCache.get(cacheKey);
+          let pageText = "";
+          if (cached && (Date.now() - cached.ts < PAGE_TEXT_CACHE_TTL)) {
+            pageText = cached.text;
+            Zotero.debug(`[LLM Assistant] PDFViewer: page ${pi + 1} text from cache (len=${pageText.length})`);
+          } else {
+            const textContent = await page.pdfPage.getTextContent();
+            if (!textContent || !textContent.items || !textContent.items.length) continue;
+            pageText = _mergeTextItems(textContent.items);
+            _pageTextCache.set(cacheKey, { text: pageText, ts: Date.now() });
+            Zotero.debug(`[LLM Assistant] PDFViewer: page ${pi + 1} text fetched (len=${pageText.length})`);
+          }
 
           const ctx = _extractContextFromText(pageText, normalizedSelected);
           if (ctx.sentence) {
@@ -1281,6 +1338,30 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
 
   function _getReaderSelection() { return _getReaderSelectionWithRect().text; }
 
+  // Accumulated streaming text for progressive display
+  let _streamAccumulated = "";
+
+  /**
+   * Show streaming progress in the popup.
+   * Updates the "AI 分析加载中..." hint with partial text as it arrives.
+   */
+  function _showStreamProgress(delta) {
+    _streamAccumulated += delta;
+    const indicator = _popupIndicator;
+    if (!indicator) return;
+    // Find or create the streaming hint element
+    let streamEl = indicator.querySelector(".llm-stream-progress");
+    if (!streamEl) {
+      streamEl = indicator.ownerDocument.createElement("div");
+      streamEl.className = "llm-stream-progress";
+      streamEl.style.cssText = "color:#92400e;font-size:11px;margin-top:3px;padding:3px 6px;border-left:2px solid #f59e0b;background:#fffbeb;border-radius:2px;white-space:pre-wrap;word-wrap:break-word;max-height:120px;overflow-y:auto;";
+      indicator.appendChild(streamEl);
+    }
+    // Show a preview of the accumulated text (first 200 chars)
+    const preview = _streamAccumulated.substring(0, 200);
+    streamEl.textContent = `AI 生成中: ${preview}${_streamAccumulated.length > 200 ? "..." : ""}`;
+  }
+
   // ── Init / Destroy ──────────────────────────────────────────────────
 
   Zotero.LLMAssistant.init = function () {
@@ -1292,6 +1373,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
   Zotero.LLMAssistant.destroy = function () {
     Zotero.debug("[LLM Assistant] Destroying...");
     _autoSummarizedItems.clear();
+    _pageTextCache.clear();
     _translateRequestID++;
     if (_translateDebounceTimer) { clearTimeout(_translateDebounceTimer); _translateDebounceTimer = null; }
     try { ui().destroy(); } catch (e) { /* */ }

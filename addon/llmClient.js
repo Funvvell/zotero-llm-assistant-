@@ -130,6 +130,126 @@ Zotero.LLMAssistant.LLMClient = {
   },
 
   /**
+   * Call the LLM API with streaming (Server-Sent Events).
+   * Calls onChunk(text) as tokens arrive, enabling progressive display.
+   * Falls back to non-streaming if XHR streaming is unavailable.
+   * @param {Array<{role:string, content:string}>} messages
+   * @param {Object} [options] - Optional overrides + { onChunk: (text) => void }
+   * @returns {Promise<string>} - The full assistant response text
+   */
+  async chatStream(messages, options = {}) {
+    Zotero.debug("[LLM Assistant] chatStream() called");
+
+    const config = this.getConfig();
+    const endpoint    = options.endpoint    || config.endpoint;
+    const apiKey      = options.apiKey      || config.apiKey;
+    const model       = options.model       || config.model;
+    const maxTokens   = options.maxTokens   || config.maxTokens;
+    const temperature = options.temperature !== undefined ? options.temperature : config.temperature;
+    const timeout     = options.timeout     || 30000;
+    const onChunk     = options.onChunk     || (() => {});
+
+    if (!apiKey) {
+      throw new Error("API Key 未配置。请在 LLM Assistant 设置中填写 API Key。");
+    }
+
+    const url = `${endpoint.replace(/\/+$/, "")}/chat/completions`;
+    const body = JSON.stringify({
+      model,
+      messages,
+      max_tokens: maxTokens,
+      temperature: Number(temperature),
+      stream: true,
+    });
+
+    Zotero.debug(`[LLM Assistant] Stream API call: ${url}, model=${model}`);
+
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url, true);
+      xhr.setRequestHeader("Content-Type", "application/json");
+      xhr.setRequestHeader("Authorization", `Bearer ${apiKey}`);
+      // Request SSE stream
+      try { xhr.responseType = "moz-chunked-text"; } catch { /* not supported */ }
+
+      let fullText = "";
+      let buffer = "";
+      let usedFallback = false;
+
+      // If moz-chunked-text isn't supported, fall back to non-streaming
+      xhr.onload = () => {
+        if (usedFallback) return;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          // If we got here without streaming, parse the full response
+          if (!fullText) {
+            try {
+              const data = JSON.parse(xhr.responseText);
+              fullText = data.choices?.[0]?.message?.content || "";
+            } catch (e) {
+              reject(new Error(`解析响应失败: ${e.message}`));
+              return;
+            }
+          }
+          Zotero.debug(`[LLM Assistant] Stream complete, length: ${fullText.length}`);
+          resolve(fullText.trim());
+        } else {
+          const errorText = xhr.responseText || "";
+          let errorMsg;
+          try {
+            const errorJson = JSON.parse(errorText);
+            errorMsg = errorJson.error?.message || errorJson.message || errorText;
+          } catch { errorMsg = errorText; }
+          if (xhr.status === 429) {
+            reject(new Error(`API 速率限制 (429): ${errorMsg}`));
+          } else if (xhr.status === 401 || xhr.status === 403) {
+            reject(new Error(`API 认证失败 (${xhr.status}): ${errorMsg}`));
+          } else {
+            reject(new Error(`API 错误 (${xhr.status}): ${errorMsg}`));
+          }
+        }
+      };
+
+      xhr.onerror = () => reject(new Error(`网络错误: 无法连接 ${url}`));
+      xhr.ontimeout = () => reject(new Error(`请求超时 (${timeout}ms)`));
+      xhr.timeout = timeout;
+
+      // Progressive parsing for moz-chunked-text
+      xhr.onprogress = () => {
+        if (xhr.responseType === "moz-chunked-text" && xhr.responseText) {
+          const chunk = xhr.responseText;
+          buffer += chunk;
+          // Parse SSE lines: "data: {...}\n\n"
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || ""; // keep incomplete line
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith("data:")) continue;
+            const data = trimmed.slice(5).trim();
+            if (data === "[DONE]") continue;
+            try {
+              const json = JSON.parse(data);
+              const delta = json.choices?.[0]?.delta?.content || "";
+              if (delta) {
+                fullText += delta;
+                try { onChunk(delta); } catch { /* callback error */ }
+              }
+            } catch { /* incomplete JSON, skip */ }
+          }
+        }
+      };
+
+      // If responseType couldn't be set, mark for fallback
+      if (xhr.responseType !== "moz-chunked-text") {
+        usedFallback = false; // will use onload to parse full response
+        Zotero.debug("[LLM Assistant] Stream: moz-chunked-text not supported, using fallback");
+      }
+
+      xhr.send(body);
+    });
+  },
+
+  /**
    * Lightweight connection test — calls GET /models (zero tokens, fast).
    * @returns {Promise<{success: boolean, message: string}>}
    */
