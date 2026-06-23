@@ -333,9 +333,14 @@ function _addMainWindowMenuItems(win) {
 
   inject();
 
-  const observer = new win.MutationObserver(() => inject());
-  observer.observe(win.document.documentElement, { childList: true, subtree: true });
-  win._llmAssistantMenuObserver = observer;
+  // Only observe the main popupset (not the entire document subtree)
+  // to avoid performance issues from unrelated DOM mutations.
+  const popupSet = win.document.getElementById("mainPopupSet");
+  if (popupSet) {
+    const observer = new win.MutationObserver(() => inject());
+    observer.observe(popupSet, { childList: true, subtree: true });
+    win._llmAssistantMenuObserver = observer;
+  }
 }
 
 function _removeMainWindowMenuItems(win) {

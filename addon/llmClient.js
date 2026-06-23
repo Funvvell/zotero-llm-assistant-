@@ -291,16 +291,53 @@ Zotero.LLMAssistant.LLMClient = {
   },
 
   /**
-   * Fetch wrapper using XMLHttpRequest.
-   * Only sets Content-Type when the caller explicitly provides it in headers
-   * (avoids sending it on GET requests where it's meaningless).
+   * Fetch wrapper using Zotero.HTTP.request (preferred, connection pooling)
+   * with XMLHttpRequest fallback.
    */
   async _fetch(url, options) {
+    // Prefer Zotero.HTTP.request (native Mozilla networking, connection pooling)
+    if (typeof Zotero !== "undefined" && Zotero.HTTP && typeof Zotero.HTTP.request === "function") {
+      try {
+        const xhrOpts = {
+          responseType: "text",
+          headers: {},
+          timeout: options.timeout || 30000,
+        };
+        if (options.body) {
+          xhrOpts.body = options.body;
+        }
+        if (options.headers) {
+          for (const [key, value] of Object.entries(options.headers)) {
+            xhrOpts.headers[key] = value;
+          }
+        }
+        const xhr = await Zotero.HTTP.request(options.method || "GET", url, xhrOpts);
+        return {
+          ok: xhr.status >= 200 && xhr.status < 300,
+          status: xhr.status,
+          text: async () => xhr.response || xhr.responseText || "",
+          json: async () => JSON.parse(xhr.response || xhr.responseText || "{}"),
+        };
+      } catch (e) {
+        // Zotero.HTTP throws on HTTP errors; extract status if available
+        if (e.status) {
+          return {
+            ok: false,
+            status: e.status,
+            text: async () => e.responseText || "",
+            json: async () => { try { return JSON.parse(e.responseText || "{}"); } catch { return {}; } },
+          };
+        }
+        // Network error — fall through to XHR fallback
+        Zotero.debug(`[LLM Assistant] Zotero.HTTP failed, trying XHR: ${e.message}`);
+      }
+    }
+
+    // Fallback: raw XMLHttpRequest
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open(options.method || "GET", url, true);
 
-      // Only set headers that the caller explicitly provides
       if (options.headers) {
         for (const [key, value] of Object.entries(options.headers)) {
           xhr.setRequestHeader(key, value);

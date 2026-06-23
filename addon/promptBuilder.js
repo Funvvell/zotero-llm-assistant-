@@ -134,19 +134,6 @@ Zotero.LLMAssistant.PromptBuilder = {
   },
 
   /**
-   * Build a prompt for translating a single word with annotation info
-   * Returns structured data: word, phonetic, partOfSpeech, translation, examples
-   */
-  buildWordTranslatePrompt(word) {
-    const lang = this._getLanguage();
-    return (
-      `You are a dictionary. For the word "${word}", provide a concise translation in ${lang}. ` +
-      `Return ONLY a JSON object with this exact structure (no markdown, no extra text):\n` +
-      `{\n  "word": "${word}",\n  "phonetic": "phonetic symbol",\n  "partOfSpeech": "词性缩写如 n./v./adj.",\n  "translation": "中文释义（简洁）",\n  "examples": ["例句1", "例句2（含中文翻译）"]\n}`
-    );
-  },
-
-  /**
    * Build a context-aware translation prompt that disambiguates the meaning
    * of a word/phrase based on the surrounding sentence and the full paper.
    *

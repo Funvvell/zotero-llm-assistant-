@@ -25,6 +25,7 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
   // Avoids repeated getTextContent() calls when selecting multiple words on the same page
   const _pageTextCache = new Map();
   const PAGE_TEXT_CACHE_TTL = 60000; // 60 seconds
+  const PAGE_TEXT_CACHE_MAX = 50;    // max entries to prevent unbounded memory growth
 
   // Popup context for progressive update
   let _popupIndicator = null;
@@ -666,28 +667,6 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
   }
 
   /**
-   * Wrap translation text as clickable word/character blocks.
-   * Chinese: each character is a block. English: each whitespace-delimited word.
-   * Used for LLM translation.
-   */
-  function _wrapAsClickableBlocks(text) {
-    if (!text) return "";
-    const hasCJK = /[\u4e00-\u9fff]/.test(text);
-    if (hasCJK) {
-      return text
-        .split(/([\u4e00-\u9fff]+)/)
-        .map((seg) => {
-          if (/^[\u4e00-\u9fff]+$/.test(seg)) {
-            return seg.split("").map(ch => _wordBlock(ch)).join("");
-          }
-          return _wrapEnglishSegment(seg);
-        })
-        .join("");
-    }
-    return _wrapEnglishSegment(text);
-  }
-
-  /**
    * Wrap traditional translation as clickable blocks split by semicolons.
    * Each segment between ; or ； is ONE block. This matches how traditional
    * translation APIs (Baidu, Youdao, etc.) return multiple meanings separated
@@ -926,6 +905,8 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
   }
 
   function _sourceLabel(source) {
+    // Reuse UIManager's sourceDisplayName to avoid duplication
+    if (ui()?.sourceDisplayName) return ui().sourceDisplayName(source);
     const map = { baidu:"百度翻译", youdao:"有道翻译", azure:"微软翻译", google:"Google 翻译", mymemory:"MyMemory" };
     return map[source] || (source || "传统翻译");
   }
@@ -1119,6 +1100,11 @@ Zotero.LLMAssistant = Zotero.LLMAssistant || {};
             const textContent = await page.pdfPage.getTextContent();
             if (!textContent || !textContent.items || !textContent.items.length) continue;
             pageText = _mergeTextItems(textContent.items);
+            // LRU eviction: remove oldest entry if cache is full
+            if (_pageTextCache.size >= PAGE_TEXT_CACHE_MAX) {
+              const oldestKey = _pageTextCache.keys().next().value;
+              _pageTextCache.delete(oldestKey);
+            }
             _pageTextCache.set(cacheKey, { text: pageText, ts: Date.now() });
             Zotero.debug(`[LLM Assistant] PDFViewer: page ${pi + 1} text fetched (len=${pageText.length})`);
           }
